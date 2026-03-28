@@ -1,0 +1,20 @@
+services:
+  stock-analyzer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      # ── Required ──────────────────────────────────────────────────────────
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      # ── Optional ──────────────────────────────────────────────────────────
+      - WATCHLIST_SYMBOLS=${WATCHLIST_SYMBOLS:-AAPL,MSFT,GOOGL,NVDA,AMZN,META,TSLA,JPM,V,UNH}
+      - ALPHA_VANTAGE_KEY=${ALPHA_VANTAGE_KEY:-}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/indices"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s

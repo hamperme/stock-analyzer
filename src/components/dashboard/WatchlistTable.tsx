@@ -1,0 +1,176 @@
+"use client";
+
+import { useEffect, useState, useCallback } from "react";
+import { useRouter } from "next/navigation";
+import { TrendingUp, TrendingDown, ChevronRight, RefreshCw, ArrowUpDown } from "lucide-react";
+import { SetupBadge } from "@/components/ui/Badge";
+import { SkeletonRow } from "@/components/ui/LoadingSpinner";
+import type { WatchlistEntry } from "@/lib/types";
+
+const REFRESH_MS = 60_000;
+
+type SortKey = keyof WatchlistEntry;
+type SortDir = "asc" | "desc";
+
+function RSICell({ rsi }: { rsi: number }) {
+  const color =
+    rsi > 70 ? "text-bear" : rsi > 55 ? "text-bull" : rsi < 30 ? "text-warn" : "text-slate-300";
+  return <span className={`font-mono font-semibold ${color}`}>{rsi.toFixed(1)}</span>;
+}
+
+function MAAlignCell({ alignment }: { alignment: WatchlistEntry["maAlignment"] }) {
+  if (alignment === "bullish")
+    return <span className="inline-flex items-center gap-1 text-bull"><TrendingUp className="h-3.5 w-3.5" /> Bullish</span>;
+  if (alignment === "bearish")
+    return <span className="inline-flex items-center gap-1 text-bear"><TrendingDown className="h-3.5 w-3.5" /> Bearish</span>;
+  return <span className="text-warn">Mixed</span>;
+}
+
+export function WatchlistTable() {
+  const router = useRouter();
+  const [stocks, setStocks] = useState<WatchlistEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [sortKey, setSortKey] = useState<SortKey>("setupScore");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+
+  const fetchWatchlist = useCallback(async () => {
+    try {
+      const res = await fetch("/api/watchlist");
+      const json = await res.json();
+      if (json.error) throw new Error(json.error);
+      setStocks(json.data);
+      setError(null);
+      setLastUpdated(new Date());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load watchlist");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchWatchlist();
+    const interval = setInterval(fetchWatchlist, REFRESH_MS);
+    return () => clearInterval(interval);
+  }, [fetchWatchlist]);
+
+  const handleSort = (key: SortKey) => {
+    if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else { setSortKey(key); setSortDir("desc"); }
+  };
+
+  const sorted = [...stocks].sort((a, b) => {
+    const av = a[sortKey] as number | string;
+    const bv = b[sortKey] as number | string;
+    const cmp = av < bv ? -1 : av > bv ? 1 : 0;
+    return sortDir === "asc" ? cmp : -cmp;
+  });
+
+  const SortHeader = ({ label, field }: { label: string; field: SortKey }) => (
+    <th
+      className="cursor-pointer select-none px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-neutral hover:text-slate-300"
+      onClick={() => handleSort(field)}
+    >
+      <span className="flex items-center gap-1">
+        {label}
+        <ArrowUpDown className="h-3 w-3 opacity-50" />
+      </span>
+    </th>
+  );
+
+  if (error) {
+    return (
+      <div className="rounded-xl border border-bear/30 bg-bear/10 p-6 text-sm text-bear">
+        {error}
+        <button onClick={fetchWatchlist} className="ml-3 underline">Retry</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-surface-border">
+      <div className="flex items-center justify-between border-b border-surface-border bg-surface px-4 py-3">
+        <h2 className="text-sm font-semibold uppercase tracking-wider text-neutral">Watchlist</h2>
+        <button
+          onClick={fetchWatchlist}
+          className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-neutral hover:bg-surface-elevated hover:text-slate-200 transition-colors"
+        >
+          <RefreshCw className="h-3.5 w-3.5" />
+          {lastUpdated ? `Updated ${lastUpdated.toLocaleTimeString()}` : "Refresh"}
+        </button>
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="w-full">
+          <thead className="border-b border-surface-border bg-surface-elevated/50">
+            <tr>
+              <SortHeader label="Symbol" field="symbol" />
+              <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-neutral">Name</th>
+              <SortHeader label="Price" field="price" />
+              <SortHeader label="Change %" field="changePercent" />
+              <SortHeader label="Rel Vol" field="relativeVolume" />
+              <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider text-neutral">MA Align</th>
+              <SortHeader label="RSI" field="rsi" />
+              <SortHeader label="Score" field="setupScore" />
+              <th className="px-4 py-3" />
+            </tr>
+          </thead>
+          <tbody className="bg-surface divide-y divide-surface-border">
+            {loading
+              ? [...Array(8)].map((_, i) => <SkeletonRow key={i} cols={9} />)
+              : sorted.map((stock) => {
+                  const isUp = stock.changePercent >= 0;
+                  return (
+                    <tr
+                      key={stock.symbol}
+                      onClick={() => router.push(`/stock/${stock.symbol}`)}
+                      className="cursor-pointer transition-colors hover:bg-surface-hover"
+                    >
+                      <td className="px-4 py-3">
+                        <span className="font-mono text-sm font-bold text-slate-100">
+                          {stock.symbol}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-sm text-neutral max-w-[140px] truncate">
+                        {stock.shortName}
+                      </td>
+                      <td className="px-4 py-3 font-mono text-sm font-semibold text-slate-200">
+                        ${stock.price.toFixed(2)}
+                      </td>
+                      <td className={`px-4 py-3 font-mono text-sm font-semibold ${isUp ? "text-bull" : "text-bear"}`}>
+                        <span className="flex items-center gap-0.5">
+                          {isUp ? <TrendingUp className="h-3.5 w-3.5" /> : <TrendingDown className="h-3.5 w-3.5" />}
+                          {isUp ? "+" : ""}{stock.changePercent.toFixed(2)}%
+                        </span>
+                      </td>
+                      <td className={`px-4 py-3 font-mono text-sm font-semibold ${stock.relativeVolume >= 1.5 ? "text-accent" : "text-slate-400"}`}>
+                        {stock.relativeVolume.toFixed(2)}x
+                      </td>
+                      <td className="px-4 py-3 text-sm">
+                        <MAAlignCell alignment={stock.maAlignment} />
+                      </td>
+                      <td className="px-4 py-3">
+                        <RSICell rsi={stock.rsi} />
+                      </td>
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-sm font-bold text-slate-200">
+                            {stock.setupScore}
+                          </span>
+                          <SetupBadge label={stock.setupLabel} />
+                        </div>
+                      </td>
+                      <td className="px-4 py-3">
+                        <ChevronRight className="h-4 w-4 text-neutral" />
+                      </td>
+                    </tr>
+                  );
+                })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
