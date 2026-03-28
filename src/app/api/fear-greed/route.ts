@@ -1,34 +1,38 @@
 import { NextResponse } from "next/server";
+import https from "https";
 import { cache, TTL } from "@/lib/cache";
 import type { FearGreedData, FearGreedLabel } from "@/lib/types";
 
-function scoreToLabel(score: number): FearGreedLabel {
-  if (score <= 25) return "Extreme Fear";
-  if (score <= 45) return "Fear";
-  if (score <= 55) return "Neutral";
-  if (score <= 75) return "Greed";
-  return "Extreme Greed";
+function normalizeLabel(rating: string): FearGreedLabel {
+  const r = rating.toLowerCase();
+  if (r.includes("extreme") && r.includes("fear")) return "Extreme Fear";
+  if (r.includes("fear")) return "Fear";
+  if (r.includes("extreme") && r.includes("greed")) return "Extreme Greed";
+  if (r.includes("greed")) return "Greed";
+  return "Neutral";
 }
 
-function vixToScore(vix: number): number {
-  // Inverse: high VIX = fear (low score), low VIX = greed (high score)
-  if (vix <= 12) return 85;
-  if (vix <= 15) return 72;
-  if (vix <= 18) return 60;
-  if (vix <= 22) return 48;
-  if (vix <= 27) return 35;
-  if (vix <= 32) return 22;
-  return 10;
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function fetchYahoo(url: string): Promise<any> {
-  const res = await fetch(url, {
-    headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
-    signal: AbortSignal.timeout(10_000),
+function httpsGetCNN(url: string): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        Referer: "https://www.cnn.com/markets/fear-and-greed",
+        Origin: "https://www.cnn.com",
+        Accept: "application/json",
+      },
+      timeout: 10_000,
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (d: Buffer) => chunks.push(d));
+      res.on("end", () => {
+        if ((res.statusCode ?? 0) >= 400) { reject(new Error(`HTTP ${res.statusCode}`)); return; }
+        try { resolve(JSON.parse(Buffer.concat(chunks).toString())); } catch { reject(new Error("Bad JSON")); }
+      });
+    });
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(); reject(new Error("Timeout")); });
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
 }
 
 export async function GET() {
@@ -37,44 +41,21 @@ export async function GET() {
   if (cached) return NextResponse.json({ data: cached, error: null });
 
   try {
-    const [vixJson, spJson] = await Promise.all([
-      fetchYahoo(
-        "https://query1.finance.yahoo.com/v11/finance/quoteSummary/%5EVIX?modules=price"
-      ),
-      fetchYahoo(
-        "https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC?interval=1d&range=6mo"
-      ),
-    ]);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const json = (await httpsGetCNN(
+      "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
+    )) as any;
 
-    // VIX current value
-    const vixPrice = vixJson?.quoteSummary?.result?.[0]?.price ?? {};
-    const vix: number = vixPrice.regularMarketPrice?.raw ?? 20;
-    const vixChange: number = (vixPrice.regularMarketChangePercent?.raw ?? 0) * 100;
+    const fg = json?.fear_and_greed;
+    if (!fg?.score) throw new Error("Unexpected CNN response shape");
 
-    // S&P 500 — 125-day MA momentum
-    const chartResult = spJson?.chart?.result?.[0];
-    const spCloses: number[] = (chartResult?.indicators?.quote?.[0]?.close ?? []).filter(
-      (v: unknown) => v != null
-    );
-    const sp125MA =
-      spCloses.length >= 125
-        ? spCloses.slice(-125).reduce((a: number, b: number) => a + b, 0) / 125
-        : spCloses[spCloses.length - 1] ?? 0;
-    const spCurrent = spCloses[spCloses.length - 1] ?? 0;
-    const spMomentum =
-      sp125MA > 0 ? Math.round(((spCurrent - sp125MA) / sp125MA) * 1000) / 10 : 0;
-
-    // Composite score (50% VIX, 50% S&P momentum)
-    const momentumScore = Math.max(0, Math.min(100, 50 + spMomentum * 2));
-    const vixScore = vixToScore(vix);
-    const score = Math.round((momentumScore * 0.5 + vixScore * 0.5));
-
+    const score = Math.round(fg.score);
     const data: FearGreedData = {
-      score: Math.max(0, Math.min(100, score)),
-      label: scoreToLabel(score),
-      vix: Math.round(vix * 100) / 100,
-      vixChange: Math.round(vixChange * 100) / 100,
-      spMomentum,
+      score,
+      label: normalizeLabel(fg.rating ?? ""),
+      vix: Math.round((fg.previous_close ?? fg.score) * 10) / 10,
+      vixChange: Math.round((fg.score - (fg.previous_close ?? fg.score)) * 10) / 10,
+      spMomentum: Math.round((fg.score - (fg.previous_1_week ?? fg.score)) * 10) / 10,
     };
 
     cache.set(cacheKey, data, TTL.FEAR_GREED);
@@ -82,7 +63,7 @@ export async function GET() {
   } catch (err) {
     console.error("[fear-greed]", err);
     return NextResponse.json(
-      { data: null, error: "Failed to compute Fear & Greed Index" },
+      { data: null, error: "Failed to fetch CNN Fear & Greed Index" },
       { status: 500 }
     );
   }

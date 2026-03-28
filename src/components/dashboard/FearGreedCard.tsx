@@ -106,7 +106,7 @@ export function FearGreedCard() {
     <Card className="flex flex-col">
       <CardHeader>
         <CardTitle>Fear &amp; Greed Index</CardTitle>
-        <span className="text-xs text-neutral">VIX-based</span>
+        <span className="text-xs text-neutral">via CNN Business</span>
       </CardHeader>
 
       <div className="flex flex-1 flex-col items-center justify-center gap-1">
@@ -119,18 +119,18 @@ export function FearGreedCard() {
 
         <div className="mt-3 grid w-full grid-cols-2 gap-2 text-xs">
           <div className="rounded-lg bg-surface-elevated p-2 text-center">
-            <p className="text-neutral">VIX</p>
-            <p className={`font-bold ${data.vixChange < 0 ? "text-bull" : "text-bear"}`}>
-              {data.vix.toFixed(2)}
+            <p className="text-neutral">Prev Close</p>
+            <p className={`font-bold ${data.vixChange >= 0 ? "text-bull" : "text-bear"}`}>
+              {data.vix.toFixed(1)}
               <span className="ml-1 font-normal text-neutral">
-                ({data.vixChange > 0 ? "+" : ""}{data.vixChange.toFixed(1)}%)
+                ({data.vixChange > 0 ? "+" : ""}{data.vixChange.toFixed(1)})
               </span>
             </p>
           </div>
           <div className="rounded-lg bg-surface-elevated p-2 text-center">
-            <p className="text-neutral">SP Momentum</p>
+            <p className="text-neutral">vs Last Week</p>
             <p className={`font-bold ${data.spMomentum >= 0 ? "text-bull" : "text-bear"}`}>
-              {data.spMomentum > 0 ? "+" : ""}{data.spMomentum.toFixed(1)}%
+              {data.spMomentum > 0 ? "+" : ""}{data.spMomentum.toFixed(1)}
             </p>
           </div>
         </div>
