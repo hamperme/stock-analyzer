@@ -10,6 +10,11 @@ import type { StockQuote, HistoricalBar, NewsItem, NewsTag } from "./types";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// Circuit breaker: once Yahoo Finance rate-limits us, skip it for 15 minutes
+let yahooBlockedUntil = 0;
+function markYahooBlocked() { yahooBlockedUntil = Date.now() + 15 * 60 * 1000; }
+function isYahooBlocked() { return Date.now() < yahooBlockedUntil; }
+
 // ─── Native https fetch (bypasses Yahoo Finance TLS fingerprint blocking) ────
 
 function httpsGet(url: string): Promise<unknown> {
@@ -23,7 +28,7 @@ function httpsGet(url: string): Promise<unknown> {
           Accept: "application/json, text/plain, */*",
           "Accept-Language": "en-US,en;q=0.9",
         },
-        timeout: 12_000,
+        timeout: 5_000,
       },
       (res) => {
         const chunks: Buffer[] = [];
@@ -47,14 +52,17 @@ function httpsGet(url: string): Promise<unknown> {
   });
 }
 
-async function yfFetch(url: string, retries = 2): Promise<unknown> {
+async function yfFetch(url: string, retries = 1): Promise<unknown> {
+  if (isYahooBlocked()) throw new Error("HTTP 429 (circuit breaker active)");
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       return await httpsGet(url);
     } catch (err) {
       const msg = (err as Error).message;
-      if (msg.includes("HTTP 429") && attempt < retries) {
-        await sleep(1500 * (attempt + 1));
+      // Never retry 429 — IP is blocked; trip the circuit breaker
+      if (msg.includes("HTTP 429")) { markYahooBlocked(); throw err; }
+      if (attempt < retries) {
+        await sleep(800);
         continue;
       }
       throw err;
