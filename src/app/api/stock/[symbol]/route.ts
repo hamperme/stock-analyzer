@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getQuote } from "@/lib/finnhub";
-import { getHistoricalData as getYahooHistory } from "@/lib/yahoo-finance";
+import { getHistoricalData as getYahooHistory, getHistoricalDataSpark } from "@/lib/yahoo-finance";
 import { getHistoricalData as getTwelveHistory } from "@/lib/twelvedata";
 import { computeIndicators } from "@/lib/calculations";
 import type { HistoricalBar, TechnicalIndicators } from "@/lib/types";
@@ -30,24 +30,24 @@ export async function GET(_req: Request, { params }: { params: { symbol: string 
     // Always get real-time quote from Finnhub (reliable)
     const quote = await getQuote(symbol);
 
-    // Try to get historical bars for indicator computation
+    // Waterfall: Yahoo v8 → Yahoo Spark → Twelve Data
     let bars: HistoricalBar[] = [];
     try {
       bars = await getYahooHistory(symbol, 365);
-    } catch (yahooErr) {
-      console.warn(`[stock/${symbol}] Yahoo failed (${(yahooErr as Error).message}), trying Twelve Data…`);
+    } catch {
       try {
-        bars = await getTwelveHistory(symbol, 365);
-      } catch (tdErr) {
-        console.warn(`[stock/${symbol}] Twelve Data also failed:`, (tdErr as Error).message);
+        bars = await getHistoricalDataSpark(symbol, 365);
+      } catch {
+        try { bars = await getTwelveHistory(symbol, 365); } catch { /* use fallback indicators */ }
       }
     }
 
-    const indicators = bars.length >= 15
+    const hasHistory = bars.length >= 15;
+    const indicators = hasHistory
       ? computeIndicators(bars, quote.volume || undefined)
       : fallbackIndicators(quote.price);
 
-    return NextResponse.json({ data: { quote, indicators }, error: null });
+    return NextResponse.json({ data: { quote, indicators, hasHistory }, error: null });
   } catch (err) {
     console.error(`[stock/${symbol}]`, err);
     return NextResponse.json({ data: null, error: `Failed to fetch data for ${symbol}` }, { status: 500 });

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getHistoricalData as getYahooHistory } from "@/lib/yahoo-finance";
+import { getHistoricalData as getYahooHistory, getHistoricalDataSpark } from "@/lib/yahoo-finance";
 import { getHistoricalData as getTwelveHistory } from "@/lib/twelvedata";
 import { enrichBarsWithMAs } from "@/lib/calculations";
 import type { HistoricalBar } from "@/lib/types";
@@ -12,12 +12,17 @@ export async function GET(req: Request, { params }: { params: { symbol: string }
   try {
     let bars: HistoricalBar[] = [];
 
-    // Try Yahoo Finance first, fall back to Twelve Data
+    // Waterfall: Yahoo v8 → Yahoo Spark → Twelve Data
     try {
       bars = await getYahooHistory(symbol, days);
-    } catch (yahooErr) {
-      console.warn(`[history/${symbol}] Yahoo failed (${(yahooErr as Error).message}), trying Twelve Data…`);
-      bars = await getTwelveHistory(symbol, days);
+    } catch {
+      console.warn(`[history/${symbol}] Yahoo v8 failed, trying Spark…`);
+      try {
+        bars = await getHistoricalDataSpark(symbol, days);
+      } catch {
+        console.warn(`[history/${symbol}] Spark failed, trying Twelve Data…`);
+        bars = await getTwelveHistory(symbol, days);
+      }
     }
 
     return NextResponse.json({ data: enrichBarsWithMAs(bars), error: null });

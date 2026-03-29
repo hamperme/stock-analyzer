@@ -79,14 +79,32 @@ export function StockChart({ data, onPeriodChange, loading }: Props) {
   const sliceDays = activePeriod;
   const sliced = data.slice(-sliceDays);
 
-  const prices = sliced.map((d) => d.close);
-  const minPrice = Math.min(...prices) * 0.97;
-  const maxPrice = Math.max(...prices) * 1.03;
+  const prices = sliced.map((d) => d.close).filter((p) => p > 0);
+  const minPrice = prices.length ? Math.min(...prices) * 0.97 : 0;
+  const maxPrice = prices.length ? Math.max(...prices) * 1.03 : 100;
 
   if (loading) {
     return (
       <div className="flex h-[420px] items-center justify-center rounded-xl border border-surface-border bg-surface">
         <div className="animate-pulse text-sm text-neutral">Loading chart…</div>
+      </div>
+    );
+  }
+
+  if (!sliced.length) {
+    return (
+      <div className="rounded-xl border border-surface-border bg-surface p-4">
+        <div className="mb-4 flex items-center gap-1">
+          {PERIODS.map(({ label, days }) => (
+            <button key={label} onClick={() => handlePeriod(days)}
+              className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-colors ${activePeriod === days ? "bg-accent text-white" : "text-neutral hover:bg-surface-elevated hover:text-slate-200"}`}>
+              {label}
+            </button>
+          ))}
+        </div>
+        <div className="flex h-[360px] items-center justify-center text-sm text-neutral">
+          Chart data unavailable — historical data will load shortly.
+        </div>
       </div>
     );
   }

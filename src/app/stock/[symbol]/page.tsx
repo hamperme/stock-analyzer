@@ -13,6 +13,7 @@ import type { StockQuote, TechnicalIndicators, ChartDataPoint } from "@/lib/type
 interface StockData {
   quote: StockQuote;
   indicators: TechnicalIndicators;
+  hasHistory: boolean;
 }
 
 export default function StockDetailPage() {
@@ -153,7 +154,7 @@ export default function StockDetailPage() {
 
       {/* Technical + AI panels side by side */}
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-        <TechnicalPanel indicators={indicators} quote={quote} />
+        <TechnicalPanel indicators={indicators} quote={quote} hasHistory={stockData.hasHistory} />
         <AIAnalysisPanel symbol={symbol} />
       </div>
 

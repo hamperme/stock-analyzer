@@ -109,6 +109,52 @@ export async function getQuote(symbol: string): Promise<StockQuote> {
   return quote;
 }
 
+// ─── Historical Data via Spark (single-symbol, lighter endpoint) ─────────────
+// The /v7/finance/spark endpoint is less rate-limited than /v8/finance/chart.
+// It only returns close + timestamp (no OHLCV volume), but that's enough for
+// RSI, MA calculation, and price line charts.
+
+export async function getHistoricalDataSpark(
+  symbol: string,
+  days = 365
+): Promise<HistoricalBar[]> {
+  const key = `spark:${symbol}:${days}`;
+  const cached = cache.get<HistoricalBar[]>(key);
+  if (cached) return cached;
+
+  const range =
+    days <= 30  ? "1mo"  :
+    days <= 90  ? "3mo"  :
+    days <= 180 ? "6mo"  :
+    days <= 365 ? "1y"   : "2y";
+
+  const url = `https://query1.finance.yahoo.com/v7/finance/spark?symbols=${encodeURIComponent(symbol)}&range=${range}&interval=1d`;
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const raw = (await yfFetch(url)) as any;
+  const result = raw?.spark?.result?.[0];
+  if (!result) throw new Error(`No spark data for ${symbol}`);
+
+  const timestamps: number[] = result.response?.[0]?.timestamp ?? [];
+  const closes: number[] = result.response?.[0]?.indicators?.quote?.[0]?.close ?? [];
+
+  if (!closes.length) throw new Error(`No spark closes for ${symbol}`);
+
+  const bars: HistoricalBar[] = timestamps
+    .map((ts, i) => ({
+      date:   new Date(ts * 1000).toISOString().split("T")[0],
+      open:   closes[i] ?? 0,
+      high:   closes[i] ?? 0,
+      low:    closes[i] ?? 0,
+      close:  Math.round((closes[i] ?? 0) * 100) / 100,
+      volume: 0,
+    }))
+    .filter((b) => b.close > 0);
+
+  cache.set(key, bars, TTL.HISTORY);
+  return bars;
+}
+
 // ─── Historical Data ──────────────────────────────────────────────────────────
 
 export async function getHistoricalData(

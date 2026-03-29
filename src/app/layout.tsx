@@ -24,7 +24,7 @@ function Navbar() {
         </Link>
         <div className="flex items-center gap-3 text-xs text-neutral">
           <span className="hidden sm:inline">
-            Data via Yahoo Finance · AI via Gemini
+            Data via Finnhub &amp; Yahoo Finance · AI via Gemini
           </span>
           <a
             href="https://github.com/hamperme/stock-analyzer"

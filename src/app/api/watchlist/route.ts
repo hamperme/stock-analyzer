@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getQuote } from "@/lib/finnhub";
-import { getHistoricalData as getYahooHistory } from "@/lib/yahoo-finance";
+import { getHistoricalData as getYahooHistory, getHistoricalDataSpark } from "@/lib/yahoo-finance";
 import { getHistoricalData as getTwelveHistory } from "@/lib/twelvedata";
 import { calculateRSI, calculateRelativeVolume, calculateSetupScore, lastSMA } from "@/lib/calculations";
 import type { WatchlistEntry, HistoricalBar } from "@/lib/types";
@@ -22,13 +22,11 @@ async function buildEntry(symbol: string): Promise<WatchlistEntry> {
   let bars: HistoricalBar[] = [];
   try {
     bars = await getYahooHistory(symbol, 60);
-  } catch (yahooErr) {
-    const msg = (yahooErr as Error).message;
-    console.warn(`[watchlist] ${symbol} Yahoo history unavailable (${msg}), trying Twelve Data…`);
+  } catch {
     try {
-      bars = await getTwelveHistory(symbol, 60);
-    } catch (tdErr) {
-      console.warn(`[watchlist] ${symbol} Twelve Data also unavailable:`, (tdErr as Error).message);
+      bars = await getHistoricalDataSpark(symbol, 60);
+    } catch {
+      try { bars = await getTwelveHistory(symbol, 60); } catch { /* ok, show defaults */ }
     }
   }
 
