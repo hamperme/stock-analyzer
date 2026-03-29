@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { TrendingUp, TrendingDown, ChevronRight, RefreshCw, ArrowUpDown } from "lucide-react";
 import { SetupBadge } from "@/components/ui/Badge";
@@ -35,18 +35,31 @@ export function WatchlistTable() {
   const [sortKey, setSortKey] = useState<SortKey>("setupScore");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
 
+  const fetchingRef = React.useRef(false);
+
   const fetchWatchlist = useCallback(async () => {
+    // Prevent concurrent fetches
+    if (fetchingRef.current) return;
+    fetchingRef.current = true;
     try {
-      const res = await fetch("/api/watchlist");
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 90_000); // 90s max
+      const res = await fetch("/api/watchlist", { signal: controller.signal });
+      clearTimeout(timeout);
       const json = await res.json();
       if (json.error) throw new Error(json.error);
-      setStocks(json.data);
+      setStocks(json.data ?? []); // guard against null
       setError(null);
       setLastUpdated(new Date());
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load watchlist");
+      if ((e as Error).name === "AbortError") {
+        setError("Request timed out — Yahoo Finance may be rate limiting. Retrying soon.");
+      } else {
+        setError(e instanceof Error ? e.message : "Failed to load watchlist");
+      }
     } finally {
       setLoading(false);
+      fetchingRef.current = false;
     }
   }, []);
 

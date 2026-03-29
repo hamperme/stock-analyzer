@@ -19,7 +19,7 @@ export function MarketIndices() {
       const res = await fetch("/api/indices");
       const json = await res.json();
       if (json.error) throw new Error(json.error);
-      setIndices(json.data);
+      setIndices(json.data ?? []);
       setError(null);
       setLastUpdated(new Date());
     } catch (e) {

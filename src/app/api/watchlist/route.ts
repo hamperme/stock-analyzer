@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getQuote, getHistoricalData } from "@/lib/yahoo-finance";
+import { getHistoricalData } from "@/lib/yahoo-finance";
 import { calculateRSI, calculateRelativeVolume, calculateSetupScore, lastSMA } from "@/lib/calculations";
 import type { WatchlistEntry } from "@/lib/types";
 
@@ -13,24 +13,25 @@ function getSymbols(): string[] {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function buildEntry(symbol: string): Promise<WatchlistEntry> {
-  const [quote, bars] = await Promise.all([
-    getQuote(symbol),
-    getHistoricalData(symbol, 60),
-  ]);
+  // ONE API call per symbol — history endpoint returns current price in meta too
+  const bars = await getHistoricalData(symbol, 60);
 
-  const closes = bars.map((b) => b.close);
+  const closes  = bars.map((b) => b.close);
   const volumes = bars.map((b) => b.volume);
 
-  const rsi = calculateRSI(closes);
-  const relativeVolume = calculateRelativeVolume(
-    volumes.slice(0, -1),
-    quote.volume > 0 ? quote.volume : (volumes[volumes.length - 1] ?? 0)
-  );
+  // Latest values from history
+  const price   = closes[closes.length - 1];
+  const prevClose = closes.length >= 2 ? closes[closes.length - 2] : price;
+  const change  = Math.round((price - prevClose) * 100) / 100;
+  const changePercent = prevClose > 0 ? Math.round((change / prevClose) * 10000) / 100 : 0;
+  const volume  = volumes[volumes.length - 1] ?? 0;
 
-  const ma20  = lastSMA(closes, 20)  || quote.price;
-  const ma50  = lastSMA(closes, 50)  || quote.ma50  || quote.price;
-  const ma200 = lastSMA(closes, 200) || quote.ma200 || quote.price;
-  const price = quote.price;
+  const rsi = calculateRSI(closes);
+  const relativeVolume = calculateRelativeVolume(volumes.slice(0, -1), volume);
+
+  const ma20  = lastSMA(closes, 20)  || price;
+  const ma50  = lastSMA(closes, 50)  || price;
+  const ma200 = lastSMA(closes, 200) || price;
 
   const maAlignment =
     ma50 > 0 && ma200 > 0
@@ -40,19 +41,19 @@ async function buildEntry(symbol: string): Promise<WatchlistEntry> {
     : "mixed";
 
   const setupScore = calculateSetupScore({ price, ma20, ma50, ma200, rsi, relativeVolume });
-
   const setupLabel =
     setupScore >= 80 ? "Strong Setup" :
     setupScore >= 60 ? "Watch" :
     setupScore >= 40 ? "Neutral" : "Avoid";
 
+  // Derive short name from symbol (full name loaded on stock detail page)
   return {
-    symbol: quote.symbol,
-    shortName: quote.shortName,
+    symbol,
+    shortName: symbol,
     price,
-    change: Math.round(quote.change * 100) / 100,
-    changePercent: Math.round(quote.changePercent * 100) / 100,
-    volume: quote.volume,
+    change,
+    changePercent,
+    volume,
     relativeVolume,
     ma50:  Math.round(ma50  * 100) / 100,
     ma200: Math.round(ma200 * 100) / 100,
@@ -68,11 +69,10 @@ export async function GET() {
     const symbols = getSymbols();
     const entries: WatchlistEntry[] = [];
 
-    // Sequential fetching to stay under Yahoo Finance rate limits
     for (const symbol of symbols) {
       try {
         entries.push(await buildEntry(symbol));
-        await sleep(150); // 150ms gap between symbols
+        await sleep(400); // 400ms between symbols — well under Yahoo rate limit
       } catch (err) {
         console.warn(`[watchlist] ${symbol} skipped:`, (err as Error).message);
       }
