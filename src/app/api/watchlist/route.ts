@@ -1,30 +1,50 @@
 import { NextResponse } from "next/server";
-import { getHistoricalData } from "@/lib/yahoo-finance";
+import * as Finnhub from "@/lib/finnhub";
+import * as Yahoo from "@/lib/yahoo-finance";
 import { calculateRSI, calculateRelativeVolume, calculateSetupScore, lastSMA } from "@/lib/calculations";
 import type { WatchlistEntry } from "@/lib/types";
 
 const DEFAULT_SYMBOLS = "AAPL,MSFT,GOOGL,NVDA,AMZN,META,TSLA,JPM,V,UNH";
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function getSymbols(): string[] {
   const raw = process.env.WATCHLIST_SYMBOLS ?? DEFAULT_SYMBOLS;
   return raw.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+function useFinnhub(): boolean {
+  return !!process.env.FINNHUB_API_KEY;
+}
 
 async function buildEntry(symbol: string): Promise<WatchlistEntry> {
-  // ONE API call per symbol — history endpoint returns current price in meta too
-  const bars = await getHistoricalData(symbol, 60);
+  const bars = useFinnhub()
+    ? await Finnhub.getHistoricalData(symbol, 60)
+    : await Yahoo.getHistoricalData(symbol, 60);
 
   const closes  = bars.map((b) => b.close);
   const volumes = bars.map((b) => b.volume);
 
-  // Latest values from history
-  const price   = closes[closes.length - 1];
+  const price     = closes[closes.length - 1];
   const prevClose = closes.length >= 2 ? closes[closes.length - 2] : price;
-  const change  = Math.round((price - prevClose) * 100) / 100;
+  const change    = Math.round((price - prevClose) * 100) / 100;
   const changePercent = prevClose > 0 ? Math.round((change / prevClose) * 10000) / 100 : 0;
-  const volume  = volumes[volumes.length - 1] ?? 0;
+  const volume    = volumes[volumes.length - 1] ?? 0;
+
+  // For Finnhub, get the real-time quote for accurate price/change
+  let realPrice = price;
+  let realChange = change;
+  let realChangePercent = changePercent;
+  let shortName = symbol;
+
+  if (useFinnhub()) {
+    try {
+      const q = await Finnhub.getQuote(symbol);
+      realPrice = q.price || price;
+      realChange = q.change;
+      realChangePercent = q.changePercent;
+      shortName = q.shortName;
+    } catch { /* use history values as fallback */ }
+  }
 
   const rsi = calculateRSI(closes);
   const relativeVolume = calculateRelativeVolume(volumes.slice(0, -1), volume);
@@ -35,24 +55,23 @@ async function buildEntry(symbol: string): Promise<WatchlistEntry> {
 
   const maAlignment =
     ma50 > 0 && ma200 > 0
-      ? ma50 > ma200 && price > ma50 ? "bullish"
-      : ma50 < ma200 && price < ma50 ? "bearish"
+      ? ma50 > ma200 && realPrice > ma50 ? "bullish"
+      : ma50 < ma200 && realPrice < ma50 ? "bearish"
       : "mixed"
     : "mixed";
 
-  const setupScore = calculateSetupScore({ price, ma20, ma50, ma200, rsi, relativeVolume });
+  const setupScore = calculateSetupScore({ price: realPrice, ma20, ma50, ma200, rsi, relativeVolume });
   const setupLabel =
     setupScore >= 80 ? "Strong Setup" :
     setupScore >= 60 ? "Watch" :
     setupScore >= 40 ? "Neutral" : "Avoid";
 
-  // Derive short name from symbol (full name loaded on stock detail page)
   return {
     symbol,
-    shortName: symbol,
-    price,
-    change,
-    changePercent,
+    shortName,
+    price: realPrice,
+    change: realChange,
+    changePercent: realChangePercent,
     volume,
     relativeVolume,
     ma50:  Math.round(ma50  * 100) / 100,
@@ -68,11 +87,12 @@ export async function GET() {
   try {
     const symbols = getSymbols();
     const entries: WatchlistEntry[] = [];
+    const delay = useFinnhub() ? 100 : 400; // Finnhub allows 60 req/min → 100ms safe
 
     for (const symbol of symbols) {
       try {
         entries.push(await buildEntry(symbol));
-        await sleep(400); // 400ms between symbols — well under Yahoo rate limit
+        await sleep(delay);
       } catch (err) {
         console.warn(`[watchlist] ${symbol} skipped:`, (err as Error).message);
       }
