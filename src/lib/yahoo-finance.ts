@@ -10,10 +10,29 @@ import type { StockQuote, HistoricalBar, NewsItem, NewsTag } from "./types";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// Circuit breaker: once Yahoo Finance rate-limits us, skip it for 15 minutes
-let yahooBlockedUntil = 0;
-function markYahooBlocked() { yahooBlockedUntil = Date.now() + 15 * 60 * 1000; }
-function isYahooBlocked() { return Date.now() < yahooBlockedUntil; }
+// Circuit breaker for the heavy v8/chart endpoint (rate-limits aggressively)
+let yahooV8BlockedUntil = 0;
+function markV8Blocked() { yahooV8BlockedUntil = Date.now() + 5 * 60 * 1000; }
+function isV8Blocked() { return Date.now() < yahooV8BlockedUntil; }
+
+// Separate circuit breaker for the lighter Spark endpoint
+let sparkBlockedUntil = 0;
+function markSparkBlocked() { sparkBlockedUntil = Date.now() + 5 * 60 * 1000; }
+function isSparkBlocked() { return Date.now() < sparkBlockedUntil; }
+
+export function resetCircuitBreakers() {
+  yahooV8BlockedUntil = 0;
+  sparkBlockedUntil = 0;
+}
+export function getCircuitBreakerStatus() {
+  const now = Date.now();
+  return {
+    v8Blocked: now < yahooV8BlockedUntil,
+    sparkBlocked: now < sparkBlockedUntil,
+    v8UnblocksIn: Math.max(0, Math.round((yahooV8BlockedUntil - now) / 1000)),
+    sparkUnblocksIn: Math.max(0, Math.round((sparkBlockedUntil - now) / 1000)),
+  };
+}
 
 // ─── Native https fetch (bypasses Yahoo Finance TLS fingerprint blocking) ────
 
@@ -52,23 +71,32 @@ function httpsGet(url: string): Promise<unknown> {
   });
 }
 
+// v8/chart endpoint fetch — has its own circuit breaker
 async function yfFetch(url: string, retries = 1): Promise<unknown> {
-  if (isYahooBlocked()) throw new Error("HTTP 429 (circuit breaker active)");
+  if (isV8Blocked()) throw new Error("HTTP 429 (v8 circuit breaker active)");
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       return await httpsGet(url);
     } catch (err) {
       const msg = (err as Error).message;
-      // Never retry 429 — IP is blocked; trip the circuit breaker
-      if (msg.includes("HTTP 429")) { markYahooBlocked(); throw err; }
-      if (attempt < retries) {
-        await sleep(800);
-        continue;
-      }
+      if (msg.includes("HTTP 429")) { markV8Blocked(); throw err; }
+      if (attempt < retries) { await sleep(800); continue; }
       throw err;
     }
   }
   throw new Error(`Max retries exceeded: ${url}`);
+}
+
+// Spark endpoint fetch — separate circuit breaker so v8 blocking doesn't affect Spark
+async function sparkFetch(url: string): Promise<unknown> {
+  if (isSparkBlocked()) throw new Error("HTTP 429 (spark circuit breaker active)");
+  try {
+    return await httpsGet(url);
+  } catch (err) {
+    const msg = (err as Error).message;
+    if (msg.includes("HTTP 429")) { markSparkBlocked(); throw err; }
+    throw err;
+  }
 }
 
 // ─── Quote ────────────────────────────────────────────────────────────────────
@@ -139,7 +167,7 @@ export async function getHistoricalDataSpark(
   const url = `https://query1.finance.yahoo.com/v7/finance/spark?symbols=${encodeURIComponent(symbol)}&range=${range}&interval=1d`;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const raw = (await yfFetch(url)) as any;
+  const raw = (await sparkFetch(url)) as any;
   const result = raw?.spark?.result?.[0];
   if (!result) throw new Error(`No spark data for ${symbol}`);
 
