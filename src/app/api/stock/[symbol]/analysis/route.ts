@@ -1,8 +1,21 @@
 import { NextResponse } from "next/server";
-import { getQuote, getHistoricalData, getNews } from "@/lib/yahoo-finance";
+import { getQuote as getFinnhubQuote } from "@/lib/finnhub";
+import { getHistoricalData as getYahooHistory, getNews } from "@/lib/yahoo-finance";
+import { getHistoricalData as getTwelveHistory } from "@/lib/twelvedata";
 import { computeIndicators } from "@/lib/calculations";
 import { generateStockAnalysis } from "@/lib/gemini";
 import { cache, TTL } from "@/lib/cache";
+import type { HistoricalBar, TechnicalIndicators } from "@/lib/types";
+
+function fallbackIndicators(price: number): TechnicalIndicators {
+  return {
+    rsi: 50, relativeVolume: 1, trendRegime: "Sideways",
+    ma20: price, ma50: price, ma200: price,
+    priceVsMa50Pct: 0, priceVsMa200Pct: 0,
+    setupScore: 0, setupLabel: "Neutral",
+    high52w: price, low52w: price, distFrom52wHighPct: 0,
+  };
+}
 
 export async function GET(
   _req: Request,
@@ -14,15 +27,23 @@ export async function GET(
   if (cached) return NextResponse.json({ data: cached, error: null });
 
   try {
-    const [quote, bars, news] = await Promise.all([
-      getQuote(symbol),
-      getHistoricalData(symbol, 365),
+    // Real-time quote from Finnhub + news from Yahoo Finance
+    const [quote, news] = await Promise.all([
+      getFinnhubQuote(symbol),
       getNews(symbol),
     ]);
 
-    const indicators = computeIndicators(bars, quote.volume);
-    if (!indicators.ma50 && quote.ma50) indicators.ma50 = quote.ma50;
-    if (!indicators.ma200 && quote.ma200) indicators.ma200 = quote.ma200;
+    // Try historical data for richer AI context
+    let bars: HistoricalBar[] = [];
+    try {
+      bars = await getYahooHistory(symbol, 365);
+    } catch {
+      try { bars = await getTwelveHistory(symbol, 365); } catch { /* ok */ }
+    }
+
+    const indicators = bars.length >= 15
+      ? computeIndicators(bars, quote.volume || undefined)
+      : fallbackIndicators(quote.price);
 
     const analysis = await generateStockAnalysis({
       symbol: quote.symbol,

@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
-import * as Finnhub from "@/lib/finnhub";
-import * as Yahoo from "@/lib/yahoo-finance";
+import { getQuote } from "@/lib/finnhub";
+import { getHistoricalData as getYahooHistory } from "@/lib/yahoo-finance";
+import { getHistoricalData as getTwelveHistory } from "@/lib/twelvedata";
 import { calculateRSI, calculateRelativeVolume, calculateSetupScore, lastSMA } from "@/lib/calculations";
-import type { WatchlistEntry } from "@/lib/types";
+import type { WatchlistEntry, HistoricalBar } from "@/lib/types";
 
 const DEFAULT_SYMBOLS = "AAPL,MSFT,GOOGL,NVDA,AMZN,META,TSLA,JPM,V,UNH";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -12,55 +13,52 @@ function getSymbols(): string[] {
   return raw.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
 }
 
-function useFinnhub(): boolean {
-  return !!process.env.FINNHUB_API_KEY;
-}
-
 async function buildEntry(symbol: string): Promise<WatchlistEntry> {
-  const bars = useFinnhub()
-    ? await Finnhub.getHistoricalData(symbol, 60)
-    : await Yahoo.getHistoricalData(symbol, 60);
+  // Get real-time quote from Finnhub (reliable, not rate-limited)
+  const quote = await getQuote(symbol);
+
+  // Try historical data for RSI/MA: Yahoo Finance first, Twelve Data as fallback.
+  // If both fail we still return a useful entry with just the real-time data.
+  let bars: HistoricalBar[] = [];
+  try {
+    bars = await getYahooHistory(symbol, 60);
+  } catch (yahooErr) {
+    const msg = (yahooErr as Error).message;
+    console.warn(`[watchlist] ${symbol} Yahoo history unavailable (${msg}), trying Twelve Data…`);
+    try {
+      bars = await getTwelveHistory(symbol, 60);
+    } catch (tdErr) {
+      console.warn(`[watchlist] ${symbol} Twelve Data also unavailable:`, (tdErr as Error).message);
+    }
+  }
 
   const closes  = bars.map((b) => b.close);
   const volumes = bars.map((b) => b.volume);
+  const volume  = volumes[volumes.length - 1] ?? 0;
 
-  const price     = closes[closes.length - 1];
-  const prevClose = closes.length >= 2 ? closes[closes.length - 2] : price;
-  const change    = Math.round((price - prevClose) * 100) / 100;
-  const changePercent = prevClose > 0 ? Math.round((change / prevClose) * 10000) / 100 : 0;
-  const volume    = volumes[volumes.length - 1] ?? 0;
+  const price = quote.price;
 
-  // For Finnhub, get the real-time quote for accurate price/change
-  let realPrice = price;
-  let realChange = change;
-  let realChangePercent = changePercent;
-  let shortName = symbol;
+  // Compute indicators only if we have enough history
+  const rsi = closes.length >= 15 ? calculateRSI(closes) : 50;
+  const relativeVolume = volumes.length >= 2
+    ? calculateRelativeVolume(volumes.slice(0, -1), volume)
+    : 1;
 
-  if (useFinnhub()) {
-    try {
-      const q = await Finnhub.getQuote(symbol);
-      realPrice = q.price || price;
-      realChange = q.change;
-      realChangePercent = q.changePercent;
-      shortName = q.shortName;
-    } catch { /* use history values as fallback */ }
-  }
-
-  const rsi = calculateRSI(closes);
-  const relativeVolume = calculateRelativeVolume(volumes.slice(0, -1), volume);
-
-  const ma20  = lastSMA(closes, 20)  || price;
-  const ma50  = lastSMA(closes, 50)  || price;
-  const ma200 = lastSMA(closes, 200) || price;
+  const ma20  = closes.length >= 20  ? (lastSMA(closes, 20)  ?? price) : price;
+  const ma50  = closes.length >= 50  ? (lastSMA(closes, 50)  ?? price) : price;
+  const ma200 = closes.length >= 200 ? (lastSMA(closes, 200) ?? price) : price;
 
   const maAlignment =
-    ma50 > 0 && ma200 > 0
-      ? ma50 > ma200 && realPrice > ma50 ? "bullish"
-      : ma50 < ma200 && realPrice < ma50 ? "bearish"
+    closes.length >= 50 && ma50 > 0 && ma200 > 0
+      ? ma50 > ma200 && price > ma50 ? "bullish"
+      : ma50 < ma200 && price < ma50 ? "bearish"
       : "mixed"
-    : "mixed";
+      : "mixed";
 
-  const setupScore = calculateSetupScore({ price: realPrice, ma20, ma50, ma200, rsi, relativeVolume });
+  const setupScore = closes.length >= 20
+    ? calculateSetupScore({ price, ma20, ma50, ma200, rsi, relativeVolume })
+    : 0;
+
   const setupLabel =
     setupScore >= 80 ? "Strong Setup" :
     setupScore >= 60 ? "Watch" :
@@ -68,10 +66,10 @@ async function buildEntry(symbol: string): Promise<WatchlistEntry> {
 
   return {
     symbol,
-    shortName,
-    price: realPrice,
-    change: realChange,
-    changePercent: realChangePercent,
+    shortName: quote.shortName,
+    price: quote.price,
+    change: quote.change,
+    changePercent: quote.changePercent,
     volume,
     relativeVolume,
     ma50:  Math.round(ma50  * 100) / 100,
@@ -87,12 +85,11 @@ export async function GET() {
   try {
     const symbols = getSymbols();
     const entries: WatchlistEntry[] = [];
-    const delay = useFinnhub() ? 100 : 400; // Finnhub allows 60 req/min → 100ms safe
 
     for (const symbol of symbols) {
       try {
         entries.push(await buildEntry(symbol));
-        await sleep(delay);
+        await sleep(200); // Finnhub: 60 req/min (2 calls/symbol = 120/min max, stay under)
       } catch (err) {
         console.warn(`[watchlist] ${symbol} skipped:`, (err as Error).message);
       }
