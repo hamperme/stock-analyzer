@@ -58,7 +58,7 @@ function SetupScoreBar({ score }: { score: number }) {
 
 export function TechnicalPanel({ indicators, quote, hasHistory = true }: Props) {
   const price = quote.price;
-  const na = "—"; // placeholder when history unavailable
+  const na = "—";
   const rsiColor =
     indicators.rsi > 70 ? "text-bear" : indicators.rsi < 30 ? "text-warn" : "text-bull";
   const regimeColor = indicators.trendRegime.includes("Up")
@@ -73,39 +73,40 @@ export function TechnicalPanel({ indicators, quote, hasHistory = true }: Props) 
         <CardTitle>Technical Indicators</CardTitle>
         <div className="flex items-center gap-2">
           <span className="text-xs text-neutral">Score</span>
-          <span className="font-mono text-sm font-bold text-slate-200">
-            {hasHistory ? `${indicators.setupScore}/100` : "—"}
-          </span>
+          <span className="font-mono text-sm font-bold text-slate-200">{indicators.setupScore}/100</span>
         </div>
       </CardHeader>
+
+      {/* Banner when indicators are defaults, not computed */}
+      {!hasHistory && (
+        <div className="mb-3 rounded-lg border border-warn/20 bg-warn/5 px-3 py-2 text-xs text-warn/80">
+          Historical data temporarily unavailable — indicators are estimates only.
+        </div>
+      )}
 
       {/* Setup Score Bar */}
       <div className="mb-4">
         <div className="flex items-center justify-between text-xs text-neutral mb-1">
           <span>Setup Quality</span>
-          {hasHistory ? (
-            <Badge variant={indicators.setupLabel === "Strong Setup" ? "strong" : indicators.setupLabel === "Watch" ? "watch" : indicators.setupLabel === "Avoid" ? "avoid" : "neutral"}>
-              {indicators.setupLabel}
-            </Badge>
-          ) : <span className="text-neutral/50 text-xs">Awaiting history data</span>}
+          <Badge variant={indicators.setupLabel === "Strong Setup" ? "strong" : indicators.setupLabel === "Watch" ? "watch" : indicators.setupLabel === "Avoid" ? "avoid" : "neutral"}>
+            {indicators.setupLabel}
+          </Badge>
         </div>
-        <SetupScoreBar score={hasHistory ? indicators.setupScore : 0} />
+        <SetupScoreBar score={indicators.setupScore} />
       </div>
 
       {/* RSI */}
       <div className="mb-4">
         <div className="flex items-center justify-between text-xs text-neutral mb-1">
           <span>RSI (14)</span>
-          {hasHistory ? (
-            <span className={`font-mono font-bold ${rsiColor}`}>
-              {indicators.rsi.toFixed(1)}
-              <span className="ml-1 text-neutral font-normal">
-                {indicators.rsi > 70 ? "Overbought" : indicators.rsi < 30 ? "Oversold" : "Healthy"}
-              </span>
+          <span className={`font-mono font-bold ${rsiColor}`}>
+            {indicators.rsi.toFixed(1)}
+            <span className="ml-1 text-neutral font-normal">
+              {indicators.rsi > 70 ? "Overbought" : indicators.rsi < 30 ? "Oversold" : "Healthy"}
             </span>
-          ) : <span className="font-mono text-neutral/50">{na}</span>}
+          </span>
         </div>
-        <RSIBar rsi={hasHistory ? indicators.rsi : 0} />
+        <RSIBar rsi={indicators.rsi} />
         <div className="flex justify-between mt-0.5 text-[10px] text-neutral/60">
           <span>0 Oversold</span>
           <span>30</span>
@@ -116,18 +117,18 @@ export function TechnicalPanel({ indicators, quote, hasHistory = true }: Props) 
 
       {/* Trend + MAs */}
       <div className="space-y-0">
-        <Metric label="Trend Regime" value={hasHistory ? indicators.trendRegime : na} color={hasHistory ? regimeColor : "text-neutral/50"} />
-        <Metric label="Relative Volume" value={hasHistory ? `${indicators.relativeVolume.toFixed(2)}x` : na}
-          color={hasHistory && indicators.relativeVolume >= 1.5 ? "text-accent" : hasHistory ? "text-slate-400" : "text-neutral/50"} />
-        <Metric label="MA20" value={hasHistory ? `$${indicators.ma20.toFixed(2)}` : na}
-          sub={hasHistory ? (price > indicators.ma20 ? "▲ above" : "▼ below") : undefined}
-          color={hasHistory ? (price > indicators.ma20 ? "text-bull" : "text-bear") : "text-neutral/50"} />
-        <Metric label="MA50" value={hasHistory ? `$${indicators.ma50.toFixed(2)}` : na}
-          sub={hasHistory ? `${indicators.priceVsMa50Pct > 0 ? "+" : ""}${indicators.priceVsMa50Pct.toFixed(1)}%` : undefined}
-          color={hasHistory ? (indicators.priceVsMa50Pct >= 0 ? "text-bull" : "text-bear") : "text-neutral/50"} />
-        <Metric label="MA200" value={hasHistory ? `$${indicators.ma200.toFixed(2)}` : na}
-          sub={hasHistory ? `${indicators.priceVsMa200Pct > 0 ? "+" : ""}${indicators.priceVsMa200Pct.toFixed(1)}%` : undefined}
-          color={hasHistory ? (indicators.priceVsMa200Pct >= 0 ? "text-bull" : "text-bear") : "text-neutral/50"} />
+        <Metric label="Trend Regime" value={indicators.trendRegime} color={regimeColor} />
+        <Metric label="Relative Volume" value={`${indicators.relativeVolume.toFixed(2)}x`}
+          color={indicators.relativeVolume >= 1.5 ? "text-accent" : "text-slate-400"} />
+        <Metric label="MA20" value={`$${indicators.ma20.toFixed(2)}`}
+          sub={price > indicators.ma20 ? "▲ above" : "▼ below"}
+          color={price > indicators.ma20 ? "text-bull" : "text-bear"} />
+        <Metric label="MA50" value={`$${indicators.ma50.toFixed(2)}`}
+          sub={`${indicators.priceVsMa50Pct > 0 ? "+" : ""}${indicators.priceVsMa50Pct.toFixed(1)}%`}
+          color={indicators.priceVsMa50Pct >= 0 ? "text-bull" : "text-bear"} />
+        <Metric label="MA200" value={`$${indicators.ma200.toFixed(2)}`}
+          sub={`${indicators.priceVsMa200Pct > 0 ? "+" : ""}${indicators.priceVsMa200Pct.toFixed(1)}%`}
+          color={indicators.priceVsMa200Pct >= 0 ? "text-bull" : "text-bear"} />
         <Metric label="52w High" value={hasHistory ? `$${indicators.high52w.toFixed(2)}` : na} />
         <Metric label="52w Low" value={hasHistory ? `$${indicators.low52w.toFixed(2)}` : na} />
         <Metric label="From 52w High"
