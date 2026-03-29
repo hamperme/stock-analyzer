@@ -27,7 +27,7 @@ function Navbar() {
             Data via Yahoo Finance · AI via Gemini
           </span>
           <a
-            href="https://github.com/your-username/stock-analyzer"
+            href="https://github.com/hamperme/stock-analyzer"
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center gap-1.5 rounded-lg border border-surface-border px-3 py-1.5 text-xs font-medium text-neutral hover:bg-surface-elevated hover:text-slate-200 transition-colors"
@@ -58,7 +58,7 @@ export default function RootLayout({
         <footer className="mt-12 border-t border-surface-border py-6 text-center text-xs text-neutral/60">
           <p>
             StockPulse · Data for informational purposes only · Not financial advice ·{" "}
-            <a href="https://github.com/your-username/stock-analyzer" className="underline hover:text-neutral">
+            <a href="https://github.com/hamperme/stock-analyzer" className="underline hover:text-neutral">
               Open Source
             </a>
           </p>
