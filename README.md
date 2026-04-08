@@ -1,4 +1,4 @@
-# StockPulse
+# Stock-analyzer
 
 **AI-assisted stock analysis dashboard with advanced charting, macro regime context, and multi-source market data.**
 
