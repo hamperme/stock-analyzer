@@ -1,12 +1,19 @@
 /**
  * Finnhub stock data client.
- * Free tier: 60 API calls/minute — plenty for this app with caching.
- * Get a free key at https://finnhub.io/register
+ * Free tier: 60 API calls/minute.
+ *
+ * Rate-limit strategy:
+ *  - Global serial queue with 500 ms minimum gap between requests
+ *  - Exponential backoff on HTTP 429: 2 s → 4 s → 8 s (3 attempts)
+ *  - Circuit breaker: 60 s cooldown after 3 consecutive 429s
+ *  - All results cached aggressively (HISTORY = 6 h, QUOTE = 1 min)
  */
 
 import https from "https";
 import { cache, TTL } from "./cache";
 import type { StockQuote, HistoricalBar, NewsItem, NewsTag } from "./types";
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function getKey(): string {
   const key = process.env.FINNHUB_API_KEY;
@@ -14,9 +21,35 @@ function getKey(): string {
   return key;
 }
 
-// ─── HTTP helper ──────────────────────────────────────────────────────────────
+// ─── Global request throttle ─────────────────────────────────────────────────
+let lastFinnhubRequest = 0;
+let finnhubQueueLock: Promise<void> = Promise.resolve();
 
-function httpsGet(url: string): Promise<unknown> {
+function throttledFetch(fn: () => Promise<unknown>): Promise<unknown> {
+  finnhubQueueLock = finnhubQueueLock.then(async () => {
+    const gap = Date.now() - lastFinnhubRequest;
+    if (gap < 500) await sleep(500 - gap);
+    lastFinnhubRequest = Date.now();
+  });
+  return finnhubQueueLock.then(fn);
+}
+
+// ─── Circuit breaker ─────────────────────────────────────────────────────────
+let finnhubBlockedUntil = 0;
+function markBlocked() { finnhubBlockedUntil = Date.now() + 60_000; }
+function isBlocked() { return Date.now() < finnhubBlockedUntil; }
+
+export function getFinnhubStatus() {
+  const now = Date.now();
+  return {
+    blocked: now < finnhubBlockedUntil,
+    unblocksIn: Math.max(0, Math.round((finnhubBlockedUntil - now) / 1000)),
+    hasKey: !!process.env.FINNHUB_API_KEY,
+  };
+}
+
+// ─── Raw HTTP helper ─────────────────────────────────────────────────────────
+function httpsGet(url: string): Promise<{ status: number; body: unknown }> {
   return new Promise((resolve, reject) => {
     const req = https.get(url, {
       headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
@@ -25,13 +58,13 @@ function httpsGet(url: string): Promise<unknown> {
       const chunks: Buffer[] = [];
       res.on("data", (d: Buffer) => chunks.push(d));
       res.on("end", () => {
-        const body = Buffer.concat(chunks).toString("utf8");
-        if ((res.statusCode ?? 0) >= 400) {
-          reject(new Error(`Finnhub HTTP ${res.statusCode}: ${body.slice(0, 100)}`));
-          return;
+        const raw = Buffer.concat(chunks).toString("utf8");
+        const status = res.statusCode ?? 0;
+        try {
+          resolve({ status, body: JSON.parse(raw) });
+        } catch {
+          reject(new Error(`Finnhub invalid JSON (HTTP ${status}): ${raw.slice(0, 120)}`));
         }
-        try { resolve(JSON.parse(body)); }
-        catch { reject(new Error("Finnhub returned invalid JSON")); }
       });
     });
     req.on("error", reject);
@@ -39,25 +72,59 @@ function httpsGet(url: string): Promise<unknown> {
   });
 }
 
-// ─── Quote ────────────────────────────────────────────────────────────────────
+// ─── Fetch with circuit breaker + exponential backoff on 429 ─────────────────
+async function fhFetch(url: string): Promise<unknown> {
+  if (isBlocked()) throw new Error("Finnhub circuit breaker active (429 cooldown)");
 
+  const delays = [2_000, 4_000, 8_000];
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { status, body } = await (throttledFetch(() => httpsGet(url)) as Promise<{ status: number; body: unknown }>);
+
+    if (status === 429) {
+      if (attempt === 2) {
+        markBlocked();
+        console.error("[finnhub] 429 × 3 — circuit breaker activated for 60 s");
+        throw new Error("Finnhub HTTP 429: rate limited (circuit breaker activated)");
+      }
+      console.warn(`[finnhub] 429 on attempt ${attempt + 1}, retrying in ${delays[attempt] / 1000}s…`);
+      await sleep(delays[attempt]);
+      continue;
+    }
+
+    if (status === 403) {
+      throw new Error(`Finnhub HTTP 403: access denied — ${JSON.stringify(body).slice(0, 100)}`);
+    }
+
+    if (status >= 400) {
+      throw new Error(`Finnhub HTTP ${status}: ${JSON.stringify(body).slice(0, 100)}`);
+    }
+
+    return body;
+  }
+  throw new Error("Finnhub: max retries exceeded");
+}
+
+// ─── Quote ────────────────────────────────────────────────────────────────────
 export async function getQuote(symbol: string): Promise<StockQuote> {
-  const key = `fh:quote:${symbol}`;
-  const cached = cache.get<StockQuote>(key);
+  const cacheKey = `fh:quote:${symbol}`;
+  const cached = cache.get<StockQuote>(cacheKey);
   if (cached) return cached;
 
   const token = getKey();
 
-  // Fetch quote + profile in parallel
   const [quoteData, profileData] = await Promise.allSettled([
-    httpsGet(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}&token=${token}`),
-    httpsGet(`https://finnhub.io/api/v1/stock/profile2?symbol=${encodeURIComponent(symbol)}&token=${token}`),
+    fhFetch(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}&token=${token}`),
+    fhFetch(`https://finnhub.io/api/v1/stock/profile2?symbol=${encodeURIComponent(symbol)}&token=${token}`),
   ]);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const q: any = quoteData.status === "fulfilled" ? quoteData.value : {};
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const p: any = profileData.status === "fulfilled" ? profileData.value : {};
+
+  if (quoteData.status === "rejected") {
+    console.warn(`[finnhub] Quote failed for ${symbol}:`, quoteData.reason?.message);
+  }
 
   const price: number = q.c ?? 0;
   const prevClose: number = q.pc ?? price;
@@ -73,7 +140,7 @@ export async function getQuote(symbol: string): Promise<StockQuote> {
     previousClose: prevClose,
     change,
     changePercent,
-    volume: 0, // Finnhub quote doesn't return volume; pulled from candles
+    volume: 0,
     avgVolume: 0,
     marketCap: p.marketCapitalization ? p.marketCapitalization * 1_000_000 : null,
     fiftyTwoWeekHigh: q.h ?? 0,
@@ -84,19 +151,28 @@ export async function getQuote(symbol: string): Promise<StockQuote> {
     currency: p.currency ?? "USD",
   };
 
-  cache.set(key, quote, TTL.QUOTE);
+  cache.set(cacheKey, quote, TTL.QUOTE);
   return quote;
 }
 
 // ─── Historical Data ──────────────────────────────────────────────────────────
-
 export async function getHistoricalData(
   symbol: string,
   days = 365
 ): Promise<HistoricalBar[]> {
-  const key = `fh:history:${symbol}:${days}`;
-  const cached = cache.get<HistoricalBar[]>(key);
+  const cacheKey = `fh:history:${symbol}:${days}`;
+  const cached = cache.get<HistoricalBar[]>(cacheKey);
   if (cached) return cached;
+
+  // Also check if a longer range is already cached and slice it
+  if (days < 1825) {
+    const full = cache.get<HistoricalBar[]>(`fh:history:${symbol}:1825`);
+    if (full) {
+      const sliced = full.slice(-days);
+      cache.set(cacheKey, sliced, TTL.HISTORY);
+      return sliced;
+    }
+  }
 
   const token = getKey();
   const toTs = Math.floor(Date.now() / 1000);
@@ -105,10 +181,10 @@ export async function getHistoricalData(
   const url = `https://finnhub.io/api/v1/stock/candle?symbol=${encodeURIComponent(symbol)}&resolution=D&from=${fromTs}&to=${toTs}&token=${token}`;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const raw = (await httpsGet(url)) as any;
+  const raw = (await fhFetch(url)) as any;
 
   if (raw.s !== "ok" || !raw.t?.length) {
-    throw new Error(`No candle data for ${symbol} (status: ${raw.s})`);
+    throw new Error(`Finnhub: no candle data for ${symbol} (status: ${raw.s ?? "unknown"})`);
   }
 
   const bars: HistoricalBar[] = raw.t.map((ts: number, i: number) => ({
@@ -120,12 +196,11 @@ export async function getHistoricalData(
     volume: raw.v[i] ?? 0,
   })).filter((b: HistoricalBar) => b.close > 0);
 
-  cache.set(key, bars, TTL.HISTORY);
+  cache.set(cacheKey, bars, TTL.HISTORY);
   return bars;
 }
 
 // ─── News ─────────────────────────────────────────────────────────────────────
-
 const TAG_PATTERNS: Array<{ pattern: RegExp; tag: NewsTag }> = [
   { pattern: /earnings|revenue|profit|eps|guidance|forecast|quarter/i,  tag: "Earnings" },
   { pattern: /launch|release|announce|unveil|introduce|new product/i,    tag: "Product Launch" },
@@ -152,8 +227,8 @@ function sentimentFromTitle(title: string): NewsItem["sentiment"] {
 }
 
 export async function getNews(symbol: string): Promise<NewsItem[]> {
-  const key = `fh:news:${symbol}`;
-  const cached = cache.get<NewsItem[]>(key);
+  const cacheKey = `fh:news:${symbol}`;
+  const cached = cache.get<NewsItem[]>(cacheKey);
   if (cached) return cached;
 
   try {
@@ -163,7 +238,7 @@ export async function getNews(symbol: string): Promise<NewsItem[]> {
 
     const url = `https://finnhub.io/api/v1/company-news?symbol=${encodeURIComponent(symbol)}&from=${from}&to=${to}&token=${token}`;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const raw = (await httpsGet(url)) as any[];
+    const raw = (await fhFetch(url)) as any[];
 
     const items: NewsItem[] = (Array.isArray(raw) ? raw : []).slice(0, 15).map((n) => ({
       title:       n.headline ?? "No title",
@@ -175,10 +250,10 @@ export async function getNews(symbol: string): Promise<NewsItem[]> {
       sentiment:   sentimentFromTitle(n.headline ?? ""),
     }));
 
-    cache.set(key, items, TTL.NEWS);
+    cache.set(cacheKey, items, TTL.NEWS);
     return items;
   } catch (err) {
-    console.error(`[getNews] ${symbol}:`, err);
+    console.error(`[finnhub] News failed for ${symbol}:`, (err as Error).message);
     return [];
   }
 }

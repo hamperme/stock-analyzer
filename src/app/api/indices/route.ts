@@ -1,6 +1,15 @@
+/**
+ * GET /api/indices
+ *
+ * Snapshot-first: returns indices from SQLite store.
+ * Falls back to live Yahoo fetch only if store is completely empty.
+ * Indices are 4 lightweight requests so one-time seeding is acceptable.
+ */
+
 import { NextResponse } from "next/server";
 import https from "https";
 import { cache, TTL } from "@/lib/cache";
+import { loadIndices, saveIndices } from "@/lib/store";
 import type { MarketIndex } from "@/lib/types";
 
 const INDEX_SYMBOLS: Array<{ symbol: string; name: string }> = [
@@ -41,10 +50,25 @@ async function fetchIndex(symbol: string, name: string): Promise<MarketIndex> {
 }
 
 export async function GET() {
+  // 1. In-memory cache
   const cacheKey = "market:indices";
-  const cached = cache.get<MarketIndex[]>(cacheKey);
-  if (cached) return NextResponse.json({ data: cached, error: null });
+  const memCached = cache.get<MarketIndex[]>(cacheKey);
+  if (memCached) return NextResponse.json({ data: memCached, error: null, source: "cache" });
 
+  // 2. SQLite store
+  const stored = loadIndices();
+  if (stored && stored.data.length > 0) {
+    cache.set(cacheKey, stored.data, TTL.INDICES);
+    return NextResponse.json({
+      data: stored.data,
+      error: null,
+      cachedAt: stored.updatedAt,
+      stale: stored.stale,
+      source: "store",
+    });
+  }
+
+  // 3. Seed fetch — indices are just 4 Yahoo requests, acceptable for first load
   try {
     const results = await Promise.allSettled(
       INDEX_SYMBOLS.map(({ symbol, name }) => fetchIndex(symbol, name))
@@ -52,10 +76,17 @@ export async function GET() {
     const indices = results
       .filter((r): r is PromiseFulfilledResult<MarketIndex> => r.status === "fulfilled")
       .map((r) => r.value);
+
     cache.set(cacheKey, indices, TTL.INDICES);
-    return NextResponse.json({ data: indices, error: null });
+    if (indices.length > 0) saveIndices(indices);
+
+    return NextResponse.json({ data: indices, error: null, source: "live-seed" });
   } catch (err) {
     console.error("[indices]", err);
-    return NextResponse.json({ data: null, error: "Failed to fetch indices" }, { status: 500 });
+    return NextResponse.json({
+      data: [],
+      error: "Failed to fetch indices — run Full Refresh.",
+      source: "empty",
+    });
   }
 }

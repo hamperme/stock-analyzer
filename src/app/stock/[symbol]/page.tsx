@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { ArrowLeft, TrendingUp, TrendingDown, RefreshCw } from "lucide-react";
 import { StockChart } from "@/components/stock/StockChart";
+import type { RangeValue, IntervalValue } from "@/components/stock/StockChart";
 import { TechnicalPanel } from "@/components/stock/TechnicalPanel";
 import { AIAnalysisPanel } from "@/components/stock/AIAnalysisPanel";
 import { NewsPanel } from "@/components/stock/NewsPanel";
@@ -23,10 +24,13 @@ export default function StockDetailPage() {
 
   const [stockData, setStockData] = useState<StockData | null>(null);
   const [chartData, setChartData] = useState<ChartDataPoint[]>([]);
-  const [chartDays, setChartDays] = useState(365);
+  const [chartRange, setChartRange] = useState<RangeValue>("6m");
+  const [chartInterval, setChartInterval] = useState<IntervalValue>("1d");
+  const [intradaySupported, setIntradaySupported] = useState(false);
   const [loadingStock, setLoadingStock] = useState(true);
   const [loadingChart, setLoadingChart] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [chartError, setChartError] = useState<string | null>(null);
 
   const fetchStock = useCallback(async () => {
     try {
@@ -42,29 +46,34 @@ export default function StockDetailPage() {
     }
   }, [symbol]);
 
-  const fetchChart = useCallback(async (days: number) => {
+  const fetchChart = useCallback(async (range: RangeValue, interval: IntervalValue) => {
     setLoadingChart(true);
+    setChartError(null);
     try {
-      const res = await fetch(`/api/stock/${symbol}/history?days=${days}`);
+      const res = await fetch(`/api/stock/${symbol}/history?range=${range}&interval=${interval}`);
       const json = await res.json();
-      if (json.error) throw new Error(json.error);
       setChartData(json.data ?? []);
-    } catch {
-      // Chart failure is non-fatal
+      setIntradaySupported(json.intradaySupported ?? false);
+      if (json.error) setChartError(json.error);
+    } catch (e) {
+      setChartError(e instanceof Error ? e.message : "Failed to load chart data");
     } finally {
       setLoadingChart(false);
     }
   }, [symbol]);
 
+  // Fetch stock data once on mount (symbol change)
   useEffect(() => {
     fetchStock();
-    fetchChart(chartDays);
-  }, [fetchStock, fetchChart, chartDays]);
+  }, [fetchStock]);
 
-  const handlePeriodChange = (days: number) => {
-    setChartDays(days);
-    fetchChart(days);
-  };
+  // Fetch chart whenever range or interval changes (including on mount)
+  useEffect(() => {
+    fetchChart(chartRange, chartInterval);
+  }, [fetchChart, chartRange, chartInterval]);
+
+  const handleRangeChange = (range: RangeValue) => setChartRange(range);
+  const handleIntervalChange = (interval: IntervalValue) => setChartInterval(interval);
 
   if (loadingStock) {
     return (
@@ -148,8 +157,14 @@ export default function StockDetailPage() {
       {/* Chart (full width) */}
       <StockChart
         data={chartData}
-        onPeriodChange={handlePeriodChange}
+        symbol={symbol}
+        activeRange={chartRange}
+        activeInterval={chartInterval}
+        intradaySupported={intradaySupported}
+        onRangeChange={handleRangeChange}
+        onIntervalChange={handleIntervalChange}
         loading={loadingChart}
+        error={chartError}
       />
 
       {/* Technical + AI panels side by side */}

@@ -27,9 +27,18 @@ yarn-error.log*
 .env*.local
 .env
 
+# Persistent data store (SQLite + legacy JSON snapshots)
+/data/
+*.db
+*.db-wal
+*.db-shm
+
 # Vercel
 .vercel
 
 # TypeScript
 *.tsbuildinfo
 next-env.d.ts
+
+# Claude Code development workspace
+.claude/

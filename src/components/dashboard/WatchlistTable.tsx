@@ -2,12 +2,12 @@
 
 import React, { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import { TrendingUp, TrendingDown, ChevronRight, RefreshCw, ArrowUpDown } from "lucide-react";
+import { TrendingUp, TrendingDown, ChevronRight, RefreshCw, ArrowUpDown, AlertTriangle } from "lucide-react";
 import { SetupBadge } from "@/components/ui/Badge";
 import { SkeletonRow } from "@/components/ui/LoadingSpinner";
 import type { WatchlistEntry } from "@/lib/types";
 
-const REFRESH_MS = 60_000;
+const REFRESH_MS = 5 * 60_000; // 5 minutes — store-first architecture reduces need for frequent polls
 
 type SortKey = keyof WatchlistEntry;
 type SortDir = "asc" | "desc";
@@ -31,11 +31,17 @@ export function WatchlistTable() {
   const [stocks, setStocks] = useState<WatchlistEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [stale, setStale] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>("setupScore");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
 
   const fetchingRef = React.useRef(false);
+  // Ref that always reflects the latest stocks state so the stable
+  // useCallback (empty deps) can check whether rows already exist
+  // without closing over a stale snapshot.
+  const stocksRef = React.useRef(stocks);
+  stocksRef.current = stocks;
 
   const fetchWatchlist = useCallback(async () => {
     // Prevent concurrent fetches
@@ -47,15 +53,44 @@ export function WatchlistTable() {
       const res = await fetch("/api/watchlist", { signal: controller.signal });
       clearTimeout(timeout);
       const json = await res.json();
-      if (json.error) throw new Error(json.error);
-      setStocks(json.data ?? []); // guard against null
-      setError(null);
-      setLastUpdated(new Date());
+
+      // Debug: log the raw payload shape
+      console.log("[WatchlistTable] /api/watchlist response:", {
+        hasData: !!json.data,
+        rowCount: Array.isArray(json.data) ? json.data.length : 0,
+        stale: json.stale,
+        source: json.source,
+        error: json.error,
+      });
+
+      if (Array.isArray(json.data) && json.data.length > 0) {
+        // We have rows — always show them, even if stale
+        setStocks(json.data);
+        setStale(!!json.stale);
+        setLastUpdated(json.cachedAt ? new Date(json.cachedAt) : new Date());
+        // Clear hard error — data is available
+        setError(null);
+      } else if (json.error) {
+        // No data AND an error — only then show the error state
+        // But do NOT clear existing stocks if we already have cached rows
+        if (stocksRef.current.length === 0) {
+          setError(json.error);
+        }
+        // If we have existing stocks, keep them visible and just mark stale
+        setStale(true);
+      }
     } catch (e) {
       if ((e as Error).name === "AbortError") {
-        setError("Request timed out — Yahoo Finance may be rate limiting. Retrying soon.");
+        // Don't clear existing data on timeout — just mark stale
+        if (stocksRef.current.length === 0) {
+          setError("Request timed out — data may be loading. Try Full Refresh.");
+        }
+        setStale(true);
       } else {
-        setError(e instanceof Error ? e.message : "Failed to load watchlist");
+        if (stocksRef.current.length === 0) {
+          setError(e instanceof Error ? e.message : "Failed to load watchlist");
+        }
+        setStale(true);
       }
     } finally {
       setLoading(false);
@@ -93,7 +128,8 @@ export function WatchlistTable() {
     </th>
   );
 
-  if (error) {
+  // Hard error with no data at all — show error banner
+  if (error && stocks.length === 0) {
     return (
       <div className="rounded-xl border border-bear/30 bg-bear/10 p-6 text-sm text-bear">
         {error}
@@ -105,7 +141,15 @@ export function WatchlistTable() {
   return (
     <div className="overflow-hidden rounded-xl border border-surface-border">
       <div className="flex items-center justify-between border-b border-surface-border bg-surface px-4 py-3">
-        <h2 className="text-sm font-semibold uppercase tracking-wider text-neutral">Watchlist</h2>
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-semibold uppercase tracking-wider text-neutral">Watchlist</h2>
+          {stale && (
+            <span className="inline-flex items-center gap-1 rounded-md bg-warn/10 px-2 py-0.5 text-[10px] font-medium text-warn">
+              <AlertTriangle className="h-3 w-3" />
+              STALE
+            </span>
+          )}
+        </div>
         <button
           onClick={fetchWatchlist}
           className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-neutral hover:bg-surface-elevated hover:text-slate-200 transition-colors"

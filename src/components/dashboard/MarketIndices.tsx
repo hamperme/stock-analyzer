@@ -6,7 +6,7 @@ import { Card } from "@/components/ui/Card";
 import { SkeletonCard } from "@/components/ui/LoadingSpinner";
 import type { MarketIndex } from "@/lib/types";
 
-const REFRESH_MS = 60_000;
+const REFRESH_MS = 5 * 60_000; // 5 minutes — store-first reduces polling pressure
 
 export function MarketIndices() {
   const [indices, setIndices] = useState<MarketIndex[]>([]);

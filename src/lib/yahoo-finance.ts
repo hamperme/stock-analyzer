@@ -1,23 +1,47 @@
 /**
  * Yahoo Finance data fetcher.
- * Uses Node.js native https module — avoids TLS fingerprint blocks
- * that affect Node.js fetch/undici with Yahoo Finance.
+ *
+ * Rate-limit strategy:
+ *  - Global serial request queue: max 1 Yahoo request in-flight at a time
+ *  - 800 ms minimum gap between consecutive requests
+ *  - Exponential backoff on 429: 2s → 4s → 8s (3 attempts)
+ *  - Short circuit breakers (30 s) so a burst doesn't block the whole server
+ *
+ * TLS fingerprint issue:
+ *  Yahoo aggressively 429s Node.js https requests based on TLS fingerprint,
+ *  while the same URL works from curl. For history fetches (the critical path),
+ *  we provide a curlFetch fallback that shells out to curl, which has a browser-
+ *  like TLS fingerprint. This is used by the refresh pipeline.
  */
 
 import https from "https";
+import { execSync } from "child_process";
 import { cache, TTL } from "./cache";
 import type { StockQuote, HistoricalBar, NewsItem, NewsTag } from "./types";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// Circuit breaker for the heavy v8/chart endpoint (rate-limits aggressively)
+// ─── Global request throttle ─────────────────────────────────────────────────
+// Ensures no two Yahoo requests fire simultaneously and enforces an 800 ms gap.
+let lastYahooRequest = 0;
+let yahooQueueLock: Promise<void> = Promise.resolve();
+
+function throttledFetch(fn: () => Promise<unknown>): Promise<unknown> {
+  yahooQueueLock = yahooQueueLock.then(async () => {
+    const gap = Date.now() - lastYahooRequest;
+    if (gap < 800) await sleep(800 - gap);
+    lastYahooRequest = Date.now();
+  });
+  return yahooQueueLock.then(fn);
+}
+
+// ─── Circuit breakers ─────────────────────────────────────────────────────────
 let yahooV8BlockedUntil = 0;
-function markV8Blocked() { yahooV8BlockedUntil = Date.now() + 5 * 60 * 1000; }
+function markV8Blocked(ms = 30_000) { yahooV8BlockedUntil = Date.now() + ms; }
 function isV8Blocked() { return Date.now() < yahooV8BlockedUntil; }
 
-// Separate circuit breaker for the lighter Spark endpoint
 let sparkBlockedUntil = 0;
-function markSparkBlocked() { sparkBlockedUntil = Date.now() + 5 * 60 * 1000; }
+function markSparkBlocked(ms = 30_000) { sparkBlockedUntil = Date.now() + ms; }
 function isSparkBlocked() { return Date.now() < sparkBlockedUntil; }
 
 export function resetCircuitBreakers() {
@@ -34,81 +58,88 @@ export function getCircuitBreakerStatus() {
   };
 }
 
-// ─── Native https fetch (bypasses Yahoo Finance TLS fingerprint blocking) ────
-
+// ─── Native https GET ───────────────────────────────────────────────────────
 function httpsGet(url: string): Promise<unknown> {
   return new Promise((resolve, reject) => {
-    const req = https.get(
-      url,
-      {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          Accept: "application/json, text/plain, */*",
-          "Accept-Language": "en-US,en;q=0.9",
-        },
-        timeout: 5_000,
+    const req = https.get(url, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        Accept: "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
       },
-      (res) => {
-        const chunks: Buffer[] = [];
-        res.on("data", (d: Buffer) => chunks.push(d));
-        res.on("end", () => {
-          const body = Buffer.concat(chunks).toString("utf8");
-          if ((res.statusCode ?? 0) >= 400) {
-            reject(new Error(`HTTP ${res.statusCode} for ${url}`));
-            return;
-          }
-          try {
-            resolve(JSON.parse(body));
-          } catch {
-            reject(new Error(`Invalid JSON from ${url}`));
-          }
-        });
-      }
-    );
+      timeout: 10_000,
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (d: Buffer) => chunks.push(d));
+      res.on("end", () => {
+        const body = Buffer.concat(chunks).toString("utf8");
+        if ((res.statusCode ?? 0) >= 400) {
+          reject(new Error(`HTTP ${res.statusCode} for ${url}`));
+          return;
+        }
+        try { resolve(JSON.parse(body)); }
+        catch { reject(new Error(`Invalid JSON from ${url}`)); }
+      });
+    });
     req.on("error", reject);
     req.on("timeout", () => { req.destroy(); reject(new Error(`Timeout for ${url}`)); });
   });
 }
 
-// v8/chart endpoint fetch — has its own circuit breaker
-async function yfFetch(url: string, retries = 1): Promise<unknown> {
+// ─── curl-based GET (bypasses TLS fingerprint 429s) ─────────────────────────
+// Yahoo rate-limits Node.js https aggressively via TLS fingerprinting.
+// curl uses the system TLS stack which Yahoo treats like a browser.
+function curlGet(url: string): unknown {
+  const stdout = execSync(
+    `curl -s --max-time 15 -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)" -H "Accept: application/json" "${url}"`,
+    { encoding: "utf8", timeout: 20_000 }
+  );
+  return JSON.parse(stdout);
+}
+
+// v8 fetch with throttle + exponential backoff on 429
+async function yfFetch(url: string): Promise<unknown> {
   if (isV8Blocked()) throw new Error("HTTP 429 (v8 circuit breaker active)");
-  for (let attempt = 0; attempt <= retries; attempt++) {
+
+  const delays = [2_000, 4_000, 8_000];
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      return await httpsGet(url);
+      return await throttledFetch(() => httpsGet(url));
     } catch (err) {
       const msg = (err as Error).message;
-      if (msg.includes("HTTP 429")) { markV8Blocked(); throw err; }
-      if (attempt < retries) { await sleep(800); continue; }
-      throw err;
+      if (msg.includes("HTTP 429")) {
+        if (attempt === 2) { markV8Blocked(60_000); throw err; } // 60 s after 3 failures
+        console.warn(`[yahoo] 429 on attempt ${attempt + 1}, waiting ${delays[attempt] / 1000}s…`);
+        await sleep(delays[attempt]);
+      } else {
+        throw err;
+      }
     }
   }
   throw new Error(`Max retries exceeded: ${url}`);
 }
 
-// Spark endpoint fetch — separate circuit breaker so v8 blocking doesn't affect Spark
+// Spark fetch with throttle + circuit breaker
 async function sparkFetch(url: string): Promise<unknown> {
   if (isSparkBlocked()) throw new Error("HTTP 429 (spark circuit breaker active)");
   try {
-    return await httpsGet(url);
+    return await throttledFetch(() => httpsGet(url));
   } catch (err) {
     const msg = (err as Error).message;
-    if (msg.includes("HTTP 429")) { markSparkBlocked(); throw err; }
+    if (msg.includes("HTTP 429")) { markSparkBlocked(60_000); throw err; }
     throw err;
   }
 }
 
 // ─── Quote ────────────────────────────────────────────────────────────────────
-
 export async function getQuote(symbol: string): Promise<StockQuote> {
   const key = `quote:${symbol}`;
   const cached = cache.get<StockQuote>(key);
   if (cached) return cached;
 
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
-    symbol
-  )}?interval=1d&range=5d`;
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=5d`;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const raw = (await yfFetch(url)) as any;
@@ -145,54 +176,8 @@ export async function getQuote(symbol: string): Promise<StockQuote> {
   return quote;
 }
 
-// ─── Historical Data via Spark (single-symbol, lighter endpoint) ─────────────
-// The /v7/finance/spark endpoint is less rate-limited than /v8/finance/chart.
-// It only returns close + timestamp (no OHLCV volume), but that's enough for
-// RSI, MA calculation, and price line charts.
-
-export async function getHistoricalDataSpark(
-  symbol: string,
-  days = 365
-): Promise<HistoricalBar[]> {
-  const key = `spark:${symbol}:${days}`;
-  const cached = cache.get<HistoricalBar[]>(key);
-  if (cached) return cached;
-
-  const range =
-    days <= 30  ? "1mo"  :
-    days <= 90  ? "3mo"  :
-    days <= 180 ? "6mo"  :
-    days <= 365 ? "1y"   : "2y";
-
-  const url = `https://query1.finance.yahoo.com/v7/finance/spark?symbols=${encodeURIComponent(symbol)}&range=${range}&interval=1d`;
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const raw = (await sparkFetch(url)) as any;
-  const result = raw?.spark?.result?.[0];
-  if (!result) throw new Error(`No spark data for ${symbol}`);
-
-  const timestamps: number[] = result.response?.[0]?.timestamp ?? [];
-  const closes: number[] = result.response?.[0]?.indicators?.quote?.[0]?.close ?? [];
-
-  if (!closes.length) throw new Error(`No spark closes for ${symbol}`);
-
-  const bars: HistoricalBar[] = timestamps
-    .map((ts, i) => ({
-      date:   new Date(ts * 1000).toISOString().split("T")[0],
-      open:   closes[i] ?? 0,
-      high:   closes[i] ?? 0,
-      low:    closes[i] ?? 0,
-      close:  Math.round((closes[i] ?? 0) * 100) / 100,
-      volume: 0,
-    }))
-    .filter((b) => b.close > 0);
-
-  cache.set(key, bars, TTL.HISTORY);
-  return bars;
-}
-
-// ─── Historical Data ──────────────────────────────────────────────────────────
-
+// ─── Historical Data (full OHLCV via v8/chart) ───────────────────────────────
+// Tries Node.js https first, falls back to curl if 429'd.
 export async function getHistoricalData(
   symbol: string,
   days = 365
@@ -202,17 +187,31 @@ export async function getHistoricalData(
   if (cached) return cached;
 
   const range =
-    days <= 30  ? "1mo"  :
-    days <= 90  ? "3mo"  :
-    days <= 180 ? "6mo"  :
-    days <= 365 ? "1y"   : "2y";
+    days <= 30   ? "1mo"  :
+    days <= 90   ? "3mo"  :
+    days <= 180  ? "6mo"  :
+    days <= 365  ? "1y"   :
+    days <= 730  ? "2y"   :
+    days <= 1825 ? "5y"   : "max";
 
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
-    symbol
-  )}?interval=1d&range=${range}`;
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=${range}`;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const raw = (await yfFetch(url)) as any;
+  let raw: any;
+
+  // Try Node.js https first
+  try {
+    raw = await yfFetch(url);
+  } catch (err) {
+    console.warn(`[yahoo/${symbol}] https failed (${(err as Error).message}), falling back to curl`);
+    // Fallback: curl bypasses TLS fingerprint 429
+    try {
+      raw = curlGet(url);
+    } catch (curlErr) {
+      throw new Error(`Yahoo v8 failed for ${symbol}: https=${(err as Error).message}, curl=${(curlErr as Error).message}`);
+    }
+  }
+
   const result = raw?.chart?.result?.[0];
   if (!result) throw new Error(`No chart data for ${symbol}`);
 
@@ -239,8 +238,62 @@ export async function getHistoricalData(
   return bars;
 }
 
-// ─── News ─────────────────────────────────────────────────────────────────────
+// ─── Historical Data via Spark (lighter fallback, close-only) ────────────────
+export async function getHistoricalDataSpark(
+  symbol: string,
+  days = 365
+): Promise<HistoricalBar[]> {
+  const key = `spark:${symbol}:${days}`;
+  const cached = cache.get<HistoricalBar[]>(key);
+  if (cached) return cached;
 
+  const range =
+    days <= 30   ? "1mo"  :
+    days <= 90   ? "3mo"  :
+    days <= 180  ? "6mo"  :
+    days <= 365  ? "1y"   :
+    days <= 730  ? "2y"   :
+    days <= 1825 ? "5y"   : "max";
+
+  const url = `https://query1.finance.yahoo.com/v7/finance/spark?symbols=${encodeURIComponent(symbol)}&range=${range}&interval=1d`;
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let raw: any;
+  try {
+    raw = await sparkFetch(url);
+  } catch (err) {
+    console.warn(`[yahoo-spark/${symbol}] https failed (${(err as Error).message}), falling back to curl`);
+    try {
+      raw = curlGet(url);
+    } catch (curlErr) {
+      throw new Error(`Yahoo Spark failed for ${symbol}: https=${(err as Error).message}, curl=${(curlErr as Error).message}`);
+    }
+  }
+
+  const result = raw?.spark?.result?.[0];
+  if (!result) throw new Error(`No spark data for ${symbol}`);
+
+  const timestamps: number[] = result.response?.[0]?.timestamp ?? [];
+  const closes: number[] = result.response?.[0]?.indicators?.quote?.[0]?.close ?? [];
+
+  if (!closes.length) throw new Error(`No spark closes for ${symbol}`);
+
+  const bars: HistoricalBar[] = timestamps
+    .map((ts, i) => ({
+      date:   new Date(ts * 1000).toISOString().split("T")[0],
+      open:   closes[i] ?? 0,
+      high:   closes[i] ?? 0,
+      low:    closes[i] ?? 0,
+      close:  Math.round((closes[i] ?? 0) * 100) / 100,
+      volume: 0,
+    }))
+    .filter((b) => b.close > 0);
+
+  cache.set(key, bars, TTL.HISTORY);
+  return bars;
+}
+
+// ─── News ─────────────────────────────────────────────────────────────────────
 const TAG_PATTERNS: Array<{ pattern: RegExp; tag: NewsTag }> = [
   { pattern: /earnings|revenue|profit|eps|guidance|forecast|quarter/i,  tag: "Earnings" },
   { pattern: /launch|release|announce|unveil|introduce|new product/i,    tag: "Product Launch" },
@@ -272,10 +325,7 @@ export async function getNews(symbol: string): Promise<NewsItem[]> {
   if (cached) return cached;
 
   try {
-    const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(
-      symbol
-    )}&newsCount=20&enableFuzzyQuery=false&quotesCount=0`;
-
+    const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(symbol)}&newsCount=20&enableFuzzyQuery=false&quotesCount=0`;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const json = (await yfFetch(url)) as any;
     const rawNews: Array<{
@@ -304,13 +354,11 @@ export async function getNews(symbol: string): Promise<NewsItem[]> {
 }
 
 // ─── Multiple Quotes ──────────────────────────────────────────────────────────
-
 export async function getMultipleQuotes(symbols: string[]): Promise<StockQuote[]> {
   const results: StockQuote[] = [];
   for (const symbol of symbols) {
     try {
       results.push(await getQuote(symbol));
-      await sleep(100);
     } catch (err) {
       console.warn(`[getMultipleQuotes] ${symbol}:`, (err as Error).message);
     }

@@ -1,55 +1,75 @@
+/**
+ * GET /api/stock/[symbol]
+ *
+ * Snapshot-first: returns quote + indicators from SQLite store.
+ * NEVER makes live provider calls on a normal page load.
+ * If the symbol isn't in the store, does a one-time live fetch to seed it,
+ * but only for the quote — history is read from store or returned empty.
+ */
+
 import { NextResponse } from "next/server";
 import { getQuote } from "@/lib/finnhub";
-import { getHistoricalData as getYahooHistory, getHistoricalDataSpark } from "@/lib/yahoo-finance";
-import { getHistoricalData as getTwelveHistory } from "@/lib/twelvedata";
 import { computeIndicators } from "@/lib/calculations";
-import type { HistoricalBar, TechnicalIndicators } from "@/lib/types";
+import { loadQuote, loadHistory, saveQuote } from "@/lib/store";
+import type { TechnicalIndicators } from "@/lib/types";
 
-/** Minimal indicators when no history is available (Finnhub quote-only). */
 function fallbackIndicators(price: number): TechnicalIndicators {
   return {
-    rsi: 50,
-    relativeVolume: 1,
-    trendRegime: "Sideways",
-    ma20: price,
-    ma50: price,
-    ma200: price,
-    priceVsMa50Pct: 0,
-    priceVsMa200Pct: 0,
-    setupScore: 0,
-    setupLabel: "Neutral",
-    high52w: price,
-    low52w: price,
-    distFrom52wHighPct: 0,
+    rsi: 50, relativeVolume: 1, trendRegime: "Sideways",
+    ma20: price, ma50: price, ma200: price,
+    priceVsMa50Pct: 0, priceVsMa200Pct: 0,
+    setupScore: 0, setupLabel: "Neutral",
+    high52w: price, low52w: price, distFrom52wHighPct: 0,
   };
 }
 
 export async function GET(_req: Request, { params }: { params: { symbol: string } }) {
   const symbol = params.symbol.toUpperCase();
+
+  // 1. Read from store (instant, no API traffic)
+  const storedQuote = loadQuote(symbol);
+  const storedHistory = loadHistory(symbol);
+
+  if (storedQuote) {
+    const bars = storedHistory?.data ?? [];
+    const hasHistory = bars.length >= 15;
+    const indicators = hasHistory
+      ? computeIndicators(bars, storedQuote.data.volume || undefined)
+      : fallbackIndicators(storedQuote.data.price);
+
+    return NextResponse.json({
+      data: { quote: storedQuote.data, indicators, hasHistory },
+      error: null,
+      cachedAt: storedQuote.updatedAt,
+      stale: storedQuote.stale,
+      source: "store",
+    });
+  }
+
+  // 2. Symbol not in store — do a lightweight one-time quote fetch to seed it.
+  //    This is the ONLY live call a page route ever makes, and only for unknown symbols.
   try {
-    // Always get real-time quote from Finnhub (reliable)
     const quote = await getQuote(symbol);
+    saveQuote(symbol, quote);
 
-    // Waterfall: Yahoo v8 → Yahoo Spark → Twelve Data
-    let bars: HistoricalBar[] = [];
-    try {
-      bars = await getYahooHistory(symbol, 365);
-    } catch {
-      try {
-        bars = await getHistoricalDataSpark(symbol, 365);
-      } catch {
-        try { bars = await getTwelveHistory(symbol, 365); } catch { /* use fallback indicators */ }
-      }
-    }
-
+    const bars = storedHistory?.data ?? [];
     const hasHistory = bars.length >= 15;
     const indicators = hasHistory
       ? computeIndicators(bars, quote.volume || undefined)
       : fallbackIndicators(quote.price);
 
-    return NextResponse.json({ data: { quote, indicators, hasHistory }, error: null });
+    return NextResponse.json({
+      data: { quote, indicators, hasHistory },
+      error: hasHistory ? null : "No history data yet — run a Full Refresh to populate.",
+      cachedAt: new Date().toISOString(),
+      stale: false,
+      source: "live-seed",
+    });
   } catch (err) {
     console.error(`[stock/${symbol}]`, err);
-    return NextResponse.json({ data: null, error: `Failed to fetch data for ${symbol}` }, { status: 500 });
+    return NextResponse.json(
+      { data: null, error: `No data for ${symbol} — run Full Refresh first, or try again.` },
+      { status: 404 }
+    );
   }
 }
