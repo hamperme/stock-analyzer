@@ -5,6 +5,8 @@
 import { NextResponse } from "next/server";
 import { getStoreStatus, loadQuote, loadHistory, loadWatchlist, loadIndices } from "@/lib/store";
 
+export const dynamic = "force-dynamic";
+
 export async function GET() {
   const status = getStoreStatus();
 

@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import { ExternalLink, Clock } from "lucide-react";
 import { formatDistanceToNow, parseISO } from "date-fns";
+import { zhCN } from "date-fns/locale";
+import { useSettings } from "@/components/app/SettingsProvider";
 import { Card, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Badge, NewsSentimentBadge } from "@/components/ui/Badge";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
@@ -19,12 +21,15 @@ const tagVariants: Record<NewsTag, "bull" | "bear" | "warn" | "accent" | "neutra
   General: "neutral",
 };
 
-function TimeAgo({ iso }: { iso: string }) {
+function TimeAgo({ iso, locale }: { iso: string; locale: "en" | "zh" }) {
   try {
     return (
       <span className="flex items-center gap-1 text-xs text-neutral">
         <Clock className="h-3 w-3" />
-        {formatDistanceToNow(parseISO(iso), { addSuffix: true })}
+        {formatDistanceToNow(parseISO(iso), {
+          addSuffix: true,
+          locale: locale === "zh" ? zhCN : undefined,
+        })}
       </span>
     );
   } catch {
@@ -33,6 +38,7 @@ function TimeAgo({ iso }: { iso: string }) {
 }
 
 export function NewsPanel({ symbol }: { symbol: string }) {
+  const { dict, locale } = useSettings();
   const [news, setNews] = useState<NewsItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -52,13 +58,13 @@ export function NewsPanel({ symbol }: { symbol: string }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Latest News</CardTitle>
-        <span className="text-xs text-neutral">{news.length} articles</span>
+        <CardTitle>{dict.news.title}</CardTitle>
+        <span className="text-xs text-neutral">{dict.news.articles(news.length)}</span>
       </CardHeader>
 
       {loading && (
         <div className="flex justify-center py-8">
-          <LoadingSpinner label="Loading news…" />
+          <LoadingSpinner label={dict.news.loading} />
         </div>
       )}
 
@@ -67,7 +73,7 @@ export function NewsPanel({ symbol }: { symbol: string }) {
       )}
 
       {!loading && !error && news.length === 0 && (
-        <p className="py-4 text-center text-sm text-neutral">No recent news found.</p>
+        <p className="py-4 text-center text-sm text-neutral">{dict.news.empty}</p>
       )}
 
       {!loading && !error && (
@@ -81,10 +87,13 @@ export function NewsPanel({ symbol }: { symbol: string }) {
               className="block rounded-lg border border-surface-border bg-surface-elevated/30 p-3 transition-colors hover:bg-surface-elevated hover:border-surface-border"
             >
               <div className="mb-1.5 flex flex-wrap items-center gap-2">
-                <Badge variant={tagVariants[item.tag]}>{item.tag}</Badge>
-                <NewsSentimentBadge sentiment={item.sentiment} />
+                <Badge variant={tagVariants[item.tag]}>{dict.news.tags[item.tag]}</Badge>
+                <NewsSentimentBadge
+                  sentiment={item.sentiment}
+                  displayLabel={dict.common[item.sentiment as "positive" | "negative" | "neutral"]}
+                />
                 <span className="text-xs text-neutral">{item.publisher}</span>
-                <TimeAgo iso={item.publishedAt} />
+                <TimeAgo iso={item.publishedAt} locale={locale} />
                 <ExternalLink className="ml-auto h-3.5 w-3.5 text-neutral/50" />
               </div>
               <p className="text-sm font-medium leading-snug text-slate-200 line-clamp-2">

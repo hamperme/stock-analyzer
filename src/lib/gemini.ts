@@ -1,26 +1,40 @@
 /**
- * Google Gemini AI integration.
+ * AI generation helpers for Gemini, OpenAI, and Claude.
  *
- * Uses @google/genai SDK with gemini-2.5-flash model.
- * Falls back to rule-based analysis when no API key is set.
+ * Prompts and fallback logic live here so multiple providers can share the
+ * same analysis behavior while keeping the rest of the app provider-agnostic.
  */
 
 import { GoogleGenAI } from "@google/genai";
-import type { AIAnalysis, TechnicalIndicators, MacroView, MacroSnapshot, MarketIndex, FearGreedData, SetupAnalysis, SetupAnalysisInput } from "./types";
+import { getAssetNoun } from "./assets";
+import { getAiProviderApiKey, getAiProviderLabel, getAiProviderModel, getAiProviderStatuses, resolveAiProvider } from "./ai-provider-server";
+import type { AppAiProvider } from "./app-settings";
+import type { AIAnalysis, TechnicalIndicators, MacroView, MacroSnapshot, SetupAnalysis, SetupAnalysisInput } from "./types";
 
-const MODEL_NAME = "gemini-2.5-flash";
-
-function getClient(): GoogleGenAI | null {
-  const key = process.env.GEMINI_API_KEY;
+function getGeminiClient(): GoogleGenAI | null {
+  const key = getAiProviderApiKey("gemini");
   if (!key) return null;
   return new GoogleGenAI({ apiKey: key });
 }
 
 /** Exported so routes/debug can inspect configuration. */
 export function getGeminiStatus() {
+  const status = getAiProviderStatuses().gemini;
   return {
-    hasKey: !!process.env.GEMINI_API_KEY,
-    model: MODEL_NAME,
+    hasKey: status.available,
+    model: status.model,
+  };
+}
+
+export function getAiStatus(requested?: string | null) {
+  const { provider, availableProviders, status } = resolveAiProvider(requested);
+  return {
+    provider,
+    label: status.label,
+    hasKey: status.available,
+    model: status.model,
+    availableProviders,
+    providers: getAiProviderStatuses(),
   };
 }
 
@@ -28,36 +42,200 @@ export function getGeminiStatus() {
 
 export interface GenerateResult {
   analysis: AIAnalysis;
-  /** "gemini" if Gemini was called, "fallback" if rule-based */
-  source: "gemini" | "fallback";
+  /** provider id if AI was called, "fallback" if rule-based */
+  source: AppAiProvider | "fallback";
   /** Non-null when source === "fallback" due to an error */
-  geminiError: string | null;
+  providerError: string | null;
+}
+
+async function generateTextWithGemini(prompt: string): Promise<string> {
+  const client = getGeminiClient();
+  if (!client) throw new Error("GEMINI_API_KEY not set");
+
+  const response = await client.models.generateContent({
+    model: getAiProviderModel("gemini"),
+    contents: prompt,
+  });
+
+  return (response.text ?? "").trim();
+}
+
+function extractOpenAiText(payload: unknown): string {
+  if (!payload || typeof payload !== "object") return "";
+  const record = payload as {
+    output_text?: unknown;
+    output?: Array<{ content?: Array<{ type?: string; text?: string }> }>;
+  };
+
+  if (typeof record.output_text === "string" && record.output_text.trim()) {
+    return record.output_text.trim();
+  }
+
+  if (Array.isArray(record.output)) {
+    return record.output
+      .flatMap((item) => Array.isArray(item.content) ? item.content : [])
+      .map((item) => (item?.type === "output_text" || item?.type === "text") && typeof item.text === "string" ? item.text : "")
+      .join("\n")
+      .trim();
+  }
+
+  return "";
+}
+
+function extractProviderErrorMessage(payload: unknown, fallback: string): string {
+  if (
+    payload &&
+    typeof payload === "object" &&
+    "error" in payload &&
+    payload.error &&
+    typeof payload.error === "object" &&
+    "message" in payload.error &&
+    typeof payload.error.message === "string"
+  ) {
+    return payload.error.message;
+  }
+
+  return fallback;
+}
+
+async function generateTextWithOpenAI(prompt: string): Promise<string> {
+  const apiKey = getAiProviderApiKey("openai");
+  if (!apiKey) throw new Error("OPENAI_API_KEY not set");
+
+  const res = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: getAiProviderModel("openai"),
+      input: prompt,
+    }),
+  });
+
+  const json = await res.json().catch(() => null);
+  if (!res.ok) {
+    throw new Error(extractProviderErrorMessage(json, `HTTP ${res.status}`));
+  }
+
+  const text = extractOpenAiText(json);
+  if (!text) throw new Error("OpenAI returned empty response");
+  return text;
+}
+
+async function generateTextWithAnthropic(prompt: string): Promise<string> {
+  const apiKey = getAiProviderApiKey("anthropic");
+  if (!apiKey) throw new Error("ANTHROPIC_API_KEY not set");
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: getAiProviderModel("anthropic"),
+      max_tokens: 1200,
+      messages: [{ role: "user", content: prompt }],
+    }),
+  });
+
+  const json = await res.json().catch(() => null);
+  if (!res.ok) {
+    throw new Error(extractProviderErrorMessage(json, `HTTP ${res.status}`));
+  }
+
+  if (!json || typeof json !== "object" || !("content" in json) || !Array.isArray(json.content)) {
+    throw new Error("Anthropic returned malformed response");
+  }
+
+  const text = json.content
+    .map((item: unknown) =>
+      item && typeof item === "object" && "type" in item && item.type === "text" && "text" in item && typeof item.text === "string"
+        ? item.text
+        : ""
+    )
+    .join("\n")
+    .trim();
+
+  if (!text) throw new Error("Anthropic returned empty response");
+  return text;
+}
+
+async function generateTextWithProvider(provider: AppAiProvider, prompt: string): Promise<string> {
+  switch (provider) {
+    case "gemini":
+      return generateTextWithGemini(prompt);
+    case "openai":
+      return generateTextWithOpenAI(prompt);
+    case "anthropic":
+      return generateTextWithAnthropic(prompt);
+  }
+}
+
+function getResponseLanguage(locale: "en" | "zh"): string {
+  return locale === "zh" ? "Simplified Chinese" : "English";
+}
+
+function stockAnalysisLanguageRules(locale: "en" | "zh"): string {
+  if (locale === "zh") {
+    return `LANGUAGE:
+- Write bullCase, bearCase, risks, summary, targetEntry, and stopLoss in Simplified Chinese.
+- Keep recommendation and confidence exactly in English as required by the schema.`;
+  }
+
+  return `LANGUAGE:
+- Write all free-text fields in English.
+- Keep recommendation and confidence exactly in English as required by the schema.`;
+}
+
+function setupAnalysisLanguageRules(locale: "en" | "zh"): string {
+  if (locale === "zh") {
+    return `LANGUAGE:
+- Write summary, interpretations, and caveats in Simplified Chinese.`;
+  }
+
+  return `LANGUAGE:
+- Write summary, interpretations, and caveats in English.`;
 }
 
 export async function generateStockAnalysis(params: {
   symbol: string;
+  assetType: "stock" | "crypto";
   shortName: string;
   price: number;
   changePercent: number;
   indicators: TechnicalIndicators;
   newsHeadlines: string[];
+  locale?: "en" | "zh";
+  provider?: AppAiProvider;
 }): Promise<GenerateResult> {
-  const client = getClient();
+  const locale = params.locale ?? "en";
+  const { provider, availableProviders } = resolveAiProvider(params.provider);
 
-  if (!client) {
+  if (availableProviders.length === 0) {
     return {
-      analysis: fallbackAnalysis(params),
+      analysis: fallbackAnalysis({ ...params, provider, noProviderConfigured: true }),
       source: "fallback",
-      geminiError: "GEMINI_API_KEY not set",
+      providerError: "No AI provider API key configured",
     };
   }
 
-  const { symbol, shortName, price, changePercent, indicators, newsHeadlines } = params;
+  const { symbol, assetType, shortName, price, changePercent, indicators, newsHeadlines } = params;
+  const assetNoun = getAssetNoun(assetType);
+  const marketLabel = assetType === "crypto" ? "digital asset" : "stock";
+  const riskContext = assetType === "crypto"
+    ? "Broader crypto market risk and sentiment shifts can overwhelm individual token setups"
+    : "Broader market risk could pressure this name regardless of fundamentals";
 
-  const prompt = `You are an expert quantitative stock analyst. Analyze this stock and return a JSON object.
+  const prompt = `You are an expert quantitative market analyst. Analyze this ${assetNoun} and return a JSON object.
 
-STOCK: ${symbol} (${shortName})
+ASSET: ${symbol} (${shortName})
+TYPE: ${marketLabel}
 PRICE: $${price.toFixed(2)} (${changePercent > 0 ? "+" : ""}${changePercent.toFixed(2)}% today)
+RISK CONTEXT: ${riskContext}
 
 TECHNICAL INDICATORS:
 - MA20: $${indicators.ma20} | MA50: $${indicators.ma50} | MA200: $${indicators.ma200}
@@ -73,6 +251,9 @@ TECHNICAL INDICATORS:
 RECENT NEWS (${newsHeadlines.length} items):
 ${newsHeadlines.slice(0, 8).map((h, i) => `${i + 1}. ${h}`).join("\n")}
 
+TARGET RESPONSE LANGUAGE: ${getResponseLanguage(locale)}
+${stockAnalysisLanguageRules(locale)}
+
 Respond ONLY with a valid JSON object matching this exact schema (no markdown, no explanation):
 {
   "bullCase": ["string", "string", "string"],
@@ -86,15 +267,10 @@ Respond ONLY with a valid JSON object matching this exact schema (no markdown, n
 }`;
 
   try {
-    const response = await client.models.generateContent({
-      model: MODEL_NAME,
-      contents: prompt,
-    });
-
-    const text = (response.text ?? "").trim();
+    const text = await generateTextWithProvider(provider, prompt);
 
     if (!text) {
-      throw new Error("Gemini returned empty response");
+      throw new Error(`${getAiProviderLabel(provider)} returned empty response`);
     }
 
     // Strip markdown code fences if present
@@ -105,17 +281,19 @@ Respond ONLY with a valid JSON object matching this exact schema (no markdown, n
       analysis: {
         ...parsed,
         generatedAt: new Date().toISOString(),
+        locale,
+        source: provider,
       },
-      source: "gemini",
-      geminiError: null,
+      source: provider,
+      providerError: null,
     };
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
-    console.error("[gemini] Analysis generation failed:", errMsg);
+    console.error(`[ai/${provider}] Analysis generation failed:`, errMsg);
     return {
-      analysis: fallbackAnalysis(params),
+      analysis: fallbackAnalysis({ ...params, provider, noProviderConfigured: false }),
       source: "fallback",
-      geminiError: errMsg,
+      providerError: errMsg,
     };
   }
 }
@@ -126,12 +304,12 @@ export async function summarizeNewsItem(
   title: string,
   symbol: string
 ): Promise<string> {
-  const client = getClient();
+  const client = getGeminiClient();
   if (!client) return "";
 
   try {
     const response = await client.models.generateContent({
-      model: MODEL_NAME,
+      model: getAiProviderModel("gemini"),
       contents: `In 1-2 sentences, summarize what this headline means for $${symbol} investors: "${title}". Be direct and analytical.`,
     });
     return (response.text ?? "").trim();
@@ -266,12 +444,15 @@ function buildSnapshotContext(snap: MacroSnapshot): { context: string; dataSourc
   return { context, dataSources };
 }
 
-export async function generateMacroView(snapshot: MacroSnapshot): Promise<MacroView> {
-  const client = getClient();
+export async function generateMacroView(
+  snapshot: MacroSnapshot,
+  requestedProvider?: AppAiProvider
+): Promise<MacroView> {
+  const { provider, availableProviders } = resolveAiProvider(requestedProvider);
   const { context, dataSources } = buildSnapshotContext(snapshot);
 
-  if (!client) {
-    return fallbackMacroView(snapshot, dataSources);
+  if (availableProviders.length === 0) {
+    return fallbackMacroView(snapshot, dataSources, true);
   }
 
   const conf = snapshot.confidence;
@@ -333,13 +514,8 @@ RULES:
 - Adjust tone to match confidence level (${conf.level}): if Low, add caveats about limited data`;
 
   try {
-    const response = await client.models.generateContent({
-      model: MODEL_NAME,
-      contents: prompt,
-    });
-
-    const text = (response.text ?? "").trim();
-    if (!text) throw new Error("Gemini returned empty response");
+    const text = await generateTextWithProvider(provider, prompt);
+    if (!text) throw new Error(`${getAiProviderLabel(provider)} returned empty response`);
 
     const cleaned = text.replace(/^```(?:json)?\n?/i, "").replace(/\n?```$/i, "");
     const parsed = JSON.parse(cleaned);
@@ -352,17 +528,21 @@ RULES:
       regime: parsed.regime ?? "Mixed",
       confidence: snapshot.confidence,
       generatedAt: new Date().toISOString(),
-      source: "gemini",
+      source: provider,
       dataSources,
       snapshot,
     };
   } catch (err) {
-    console.error("[gemini] Macro view generation failed:", (err as Error).message);
-    return fallbackMacroView(snapshot, dataSources);
+    console.error(`[ai/${provider}] Macro view generation failed:`, (err as Error).message);
+    return fallbackMacroView(snapshot, dataSources, false);
   }
 }
 
-function fallbackMacroView(snap: MacroSnapshot, dataSources: string[]): MacroView {
+function fallbackMacroView(
+  snap: MacroSnapshot,
+  dataSources: string[],
+  noProviderConfigured = false
+): MacroView {
   const avgChange = snap.indices.length > 0
     ? snap.indices.reduce((s, i) => s + i.changePercent, 0) / snap.indices.length
     : 0;
@@ -469,7 +649,10 @@ function fallbackMacroView(snap: MacroSnapshot, dataSources: string[]): MacroVie
   if (snap.curveShape) parts.push(`${snap.curveShape.toLowerCase()} yield curve`);
   if (pp.source !== "unavailable") parts.push(`${pp.bias.toLowerCase()} policy bias`);
   if (fg) parts.push(`F&G at ${fg.score}`);
-  const neutralSummary = `Market showing ${parts.join(", ")}. ${br.assessment ? `Breadth is ${br.assessment.toLowerCase()} (${br.source}).` : ""} Rule-based summary — configure GEMINI_API_KEY for AI-synthesized views.`.trim();
+  const fallbackTail = noProviderConfigured
+    ? "Rule-based summary — configure GEMINI_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY for AI-synthesized views."
+    : "Rule-based summary — the selected AI provider did not return a usable response this time.";
+  const neutralSummary = `Market showing ${parts.join(", ")}. ${br.assessment ? `Breadth is ${br.assessment.toLowerCase()} (${br.source}).` : ""} ${fallbackTail}`.trim();
 
   // ── Regime ──
   let regime: MacroView["regime"] = "Mixed";
@@ -494,14 +677,15 @@ function fallbackMacroView(snap: MacroSnapshot, dataSources: string[]): MacroVie
 // ─── Chart Setup Analysis ────────────────────────────────────────────────────
 
 export async function generateSetupAnalysis(input: SetupAnalysisInput): Promise<SetupAnalysis> {
-  const client = getClient();
+  const { provider, availableProviders } = resolveAiProvider(input.provider);
   const indicatorsUsed = input.activeIndicators.map((i) => i.name);
   const ctx = { symbol: input.symbol, range: input.range, interval: input.interval, chartType: input.chartType };
+  const locale = input.locale ?? "en";
 
   const hasMacroContext = !!input.macroContext;
 
-  if (!client) {
-    return fallbackSetupAnalysis(input, indicatorsUsed, ctx, hasMacroContext);
+  if (availableProviders.length === 0) {
+    return fallbackSetupAnalysis(input, indicatorsUsed, ctx, hasMacroContext, "missing_key");
   }
 
   // Build indicator context — include structured data when available
@@ -554,19 +738,19 @@ export async function generateSetupAnalysis(input: SetupAnalysisInput): Promise<
 
 CHART CONTEXT:
   Symbol: ${input.symbol}
+  Asset Type: ${input.assetType ?? "stock"}
   Price: $${input.price.toFixed(2)}
   Range: ${input.range}  |  Interval: ${input.interval}  |  Type: ${input.chartType}
 
 ${indicatorBlock}
-${macroBlock}Respond ONLY with a valid JSON object (no markdown fences):
+${macroBlock}TARGET RESPONSE LANGUAGE: ${getResponseLanguage(locale)}
+${setupAnalysisLanguageRules(locale)}
+
+Respond ONLY with a valid JSON object (no markdown fences):
 {
-  "bias": "Bullish" | "Bearish" | "Neutral" | "Mixed",
-  "regime": "1 sentence: what type of setup is this? (e.g., 'trending with momentum confirmation', 'range-bound with conflicting signals')",
-  "bullishEvidence": ["2-4 specific bullish signals from the ACTIVE indicators above — cite the numbers"],
-  "bearishEvidence": ["2-4 specific bearish signals or caution flags — cite the numbers"],
-  "conflicts": ["0-2 signal conflicts between active indicators, if any"],
-  "confirmsNext": "1 sentence: what specific price action or indicator reading would confirm the current bias?",
-  "invalidatesNext": "1 sentence: what would invalidate the current setup?"
+  "summary": "2-4 sentence plain-language interpretation of what the currently enabled indicators are saying together",
+  "interpretations": ["1 sentence per active indicator or meaningful signal cluster — cite the values"],
+  "caveats": ["0-2 short notes about conflicts, uncertainty, or stale macro context if relevant"]
 }
 
 RULES:
@@ -577,6 +761,7 @@ RULES:
 - When macro context is provided: note agreement or conflict between the macro regime and the technical setup (e.g., bullish technicals in a Risk-Off macro = conflict worth noting)
 - If macro confidence is Low or data is STALE, note this uncertainty rather than relying heavily on macro signals
 - Be trader-friendly and concise
+- Do not split the answer into bullish and bearish sections
 - Do not predict price targets
 - Do not give buy/sell advice
 - Frame as interpretation and scenario analysis
@@ -584,34 +769,41 @@ RULES:
 - If few indicators are active, keep the analysis proportionally brief`;
 
   try {
-    const response = await client.models.generateContent({
-      model: MODEL_NAME,
-      contents: prompt,
-    });
-
-    const text = (response.text ?? "").trim();
-    if (!text) throw new Error("Gemini returned empty response");
+    const text = await generateTextWithProvider(provider, prompt);
+    if (!text) throw new Error(`${getAiProviderLabel(provider)} returned empty response`);
 
     const cleaned = text.replace(/^```(?:json)?\n?/i, "").replace(/\n?```$/i, "");
     const parsed = JSON.parse(cleaned);
 
+    const summary =
+      typeof parsed.summary === "string" && parsed.summary.trim()
+        ? parsed.summary.trim()
+        : typeof parsed.regime === "string"
+        ? parsed.regime.trim()
+        : "";
+    const interpretations = Array.isArray(parsed.interpretations)
+      ? parsed.interpretations.filter((item: unknown): item is string => typeof item === "string" && item.trim().length > 0)
+      : [
+          ...(Array.isArray(parsed.bullishEvidence) ? parsed.bullishEvidence : []),
+          ...(Array.isArray(parsed.bearishEvidence) ? parsed.bearishEvidence : []),
+        ].filter((item: unknown): item is string => typeof item === "string" && item.trim().length > 0);
+    const caveats = Array.isArray(parsed.caveats)
+      ? parsed.caveats.filter((item: unknown): item is string => typeof item === "string" && item.trim().length > 0)
+      : (Array.isArray(parsed.conflicts) ? parsed.conflicts : []).filter((item: unknown): item is string => typeof item === "string" && item.trim().length > 0);
+
     return {
-      bias: parsed.bias ?? "Neutral",
-      regime: parsed.regime ?? "",
-      bullishEvidence: parsed.bullishEvidence ?? [],
-      bearishEvidence: parsed.bearishEvidence ?? [],
-      conflicts: parsed.conflicts ?? [],
-      confirmsNext: parsed.confirmsNext ?? "",
-      invalidatesNext: parsed.invalidatesNext ?? "",
+      summary,
+      interpretations,
+      caveats,
       generatedAt: new Date().toISOString(),
-      source: "gemini",
+      source: provider,
       indicatorsUsed,
       context: ctx,
       hasMacroContext,
     };
   } catch (err) {
-    console.error("[gemini] Setup analysis failed:", (err as Error).message);
-    return fallbackSetupAnalysis(input, indicatorsUsed, ctx, hasMacroContext);
+    console.error(`[ai/${provider}] Setup analysis failed:`, (err as Error).message);
+    return fallbackSetupAnalysis(input, indicatorsUsed, ctx, hasMacroContext, "generation_failed");
   }
 }
 
@@ -620,10 +812,14 @@ function fallbackSetupAnalysis(
   indicatorsUsed: string[],
   ctx: SetupAnalysis["context"],
   hasMacroContext: boolean,
+  fallbackReason: "missing_key" | "generation_failed",
 ): SetupAnalysis {
-  const bullish: string[] = [];
-  const bearish: string[] = [];
-  const conflicts: string[] = [];
+  const locale = input.locale ?? "en";
+  const isZh = locale === "zh";
+  const interpretations: string[] = [];
+  const caveats: string[] = [];
+  let constructiveSignals = 0;
+  let cautionSignals = 0;
 
   for (const ind of input.activeIndicators) {
     const s = ind.state.toLowerCase();
@@ -631,64 +827,107 @@ function fallbackSetupAnalysis(
     if (ind.structured?.pitchfork) {
       const pf = ind.structured.pitchfork;
       if (pf.medianSlope === "rising" && (pf.position === "near-median" || pf.position === "lower-half")) {
-        bullish.push(`Pitchfork: price in ${pf.position.replace(/-/g, " ")} with rising median — potential support`);
+        constructiveSignals += 1;
+        interpretations.push(
+          isZh
+            ? `Pitchfork：价格位于${pf.position.replace(/-/g, " ")}，中轴上行，可能形成支撑`
+            : `Pitchfork: price in ${pf.position.replace(/-/g, " ")} with rising median — potential support`
+        );
       } else if (pf.medianSlope === "falling" && (pf.position === "near-median" || pf.position === "upper-half")) {
-        bearish.push(`Pitchfork: price in ${pf.position.replace(/-/g, " ")} with falling median — potential resistance`);
+        cautionSignals += 1;
+        interpretations.push(
+          isZh
+            ? `Pitchfork：价格位于${pf.position.replace(/-/g, " ")}，中轴下行，可能形成阻力`
+            : `Pitchfork: price in ${pf.position.replace(/-/g, " ")} with falling median — potential resistance`
+        );
       }
       if (pf.position === "above-upper-warning" || pf.position === "upper-warning-zone") {
-        bearish.push(`Pitchfork: price extended into ${pf.position.replace(/-/g, " ")} (${pf.distFromMedianPct}% from median)`);
+        cautionSignals += 1;
+        interpretations.push(
+          isZh
+            ? `Pitchfork：价格已延伸至${pf.position.replace(/-/g, " ")}（距离中轴 ${pf.distFromMedianPct}%）`
+            : `Pitchfork: price extended into ${pf.position.replace(/-/g, " ")} (${pf.distFromMedianPct}% from median)`
+        );
       }
       if (pf.position === "below-lower-warning" || pf.position === "lower-warning-zone") {
-        bullish.push(`Pitchfork: price extended into ${pf.position.replace(/-/g, " ")} — potential mean reversion zone`);
+        constructiveSignals += 1;
+        interpretations.push(
+          isZh
+            ? `Pitchfork：价格已延伸至${pf.position.replace(/-/g, " ")}，可能进入均值回归区域`
+            : `Pitchfork: price extended into ${pf.position.replace(/-/g, " ")} — potential mean reversion zone`
+        );
       }
       if (pf.reverting) {
-        const revertDir = pf.distFromMedianPct > 0 ? "down toward" : "up toward";
-        bullish.push(`Pitchfork: price reverting ${revertDir} median`);
+        const revertDir = pf.distFromMedianPct > 0
+          ? (isZh ? "向下回归中轴" : "down toward")
+          : (isZh ? "向上回归中轴" : "up toward");
+        interpretations.push(
+          isZh
+            ? `Pitchfork：价格正在${revertDir}`
+            : `Pitchfork: price reverting ${revertDir} median`
+        );
       }
-    } else if (s.includes("bullish") || s.includes("overbought") || s.includes("above")) {
-      bullish.push(`${ind.name}: ${ind.state}`);
-    } else if (s.includes("bearish") || s.includes("oversold") || s.includes("below")) {
-      bearish.push(`${ind.name}: ${ind.state}`);
+    } else {
+      if (s.includes("bullish") || s.includes("above")) constructiveSignals += 1;
+      if (s.includes("bearish") || s.includes("below") || s.includes("overbought") || s.includes("oversold")) cautionSignals += 1;
+      interpretations.push(isZh ? `${ind.name}：${ind.state}` : `${ind.name}: ${ind.state}`);
     }
   }
 
-  // Use structured macro for richer fallback
+  // Use structured macro for context notes instead of directional buckets
   if (input.macroContext) {
     const mc = input.macroContext;
-    if (mc.regime === "Risk-On") bullish.push(`Macro regime: ${mc.regime}`);
-    else if (mc.regime === "Risk-Off") bearish.push(`Macro regime: ${mc.regime}`);
-    if (mc.volatility && mc.volatility.regime === "extreme") bearish.push(`VIX elevated at ${mc.volatility.vix.toFixed(1)}`);
-  }
-
-  if (bullish.length > 0 && bearish.length > 0) {
-    conflicts.push("Mixed signals across active indicators");
-  }
-
-  // Check for macro vs technical conflict
-  if (input.macroContext) {
-    const techBias = bullish.length > bearish.length ? "bullish" : bearish.length > bullish.length ? "bearish" : "mixed";
-    if ((input.macroContext.regime === "Risk-Off" && techBias === "bullish") ||
-        (input.macroContext.regime === "Risk-On" && techBias === "bearish")) {
-      conflicts.push(`Macro regime (${input.macroContext.regime}) conflicts with technical setup (${techBias})`);
+    if (mc.regime === "Risk-On") {
+      caveats.push(isZh ? `宏观环境偏支持风险资产（${mc.regime}）` : `Macro backdrop is more supportive for risk assets (${mc.regime})`);
+    } else if (mc.regime === "Risk-Off") {
+      caveats.push(isZh ? `宏观环境偏谨慎（${mc.regime}），技术信号需要更强确认` : `Macro backdrop is cautious (${mc.regime}), so technical readings may need stronger confirmation`);
+    }
+    if (mc.volatility && mc.volatility.regime === "extreme") {
+      caveats.push(isZh ? `VIX 处于高位：${mc.volatility.vix.toFixed(1)}` : `VIX is elevated at ${mc.volatility.vix.toFixed(1)}`);
+    }
+    if (mc.isStale || mc.confidence === "Low") {
+      caveats.push(isZh ? "宏观上下文置信度较低或数据偏旧，请降低对宏观部分的权重" : "Macro context is low-confidence or stale, so it should carry less weight");
     }
   }
 
-  const bias = bullish.length > bearish.length ? "Bullish"
-    : bearish.length > bullish.length ? "Bearish"
-    : input.activeIndicators.length > 0 ? "Mixed" : "Neutral";
+  if (constructiveSignals > 0 && cautionSignals > 0) {
+    caveats.push(isZh ? "当前启用指标之间存在分歧，读数更偏向拉锯而不是单边确认" : "The active indicators are not fully aligned, so the read is mixed rather than one-sided");
+  }
+
+  const missingKeyMessage = isZh
+    ? "如需更细致的 AI 形态解读，请在 .env.local 中配置 GEMINI_API_KEY、OPENAI_API_KEY 或 ANTHROPIC_API_KEY"
+    : "Configure GEMINI_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY in .env.local for AI-powered setup interpretation";
+  const generationFailedMessage = isZh
+    ? "所选 AI 提供方本次未成功返回可用结果，当前显示规则回退分析。可稍后重试。"
+    : "The selected AI provider did not return a usable setup analysis this time, so a rule-based fallback is shown. Try again shortly.";
+  caveats.push(fallbackReason === "missing_key" ? missingKeyMessage : generationFailedMessage);
+
+  let summary: string;
+  if (input.activeIndicators.length === 0) {
+    summary = isZh
+      ? "当前没有启用高级指标，因此这里没有额外的指标解读，主要仍是价格行为观察。"
+      : "No advanced indicators are enabled right now, so there is no extra indicator read beyond price action.";
+  } else if (constructiveSignals > cautionSignals) {
+    summary = isZh
+      ? `当前已启用 ${input.activeIndicators.length} 个指标，整体读数偏积极，但仍应结合后续价格确认。`
+      : `There are ${input.activeIndicators.length} active indicators, and the combined read is leaning constructive, though it still needs price confirmation.`;
+  } else if (cautionSignals > constructiveSignals) {
+    summary = isZh
+      ? `当前已启用 ${input.activeIndicators.length} 个指标，整体读数偏谨慎，说明趋势延续性仍需进一步确认。`
+      : `There are ${input.activeIndicators.length} active indicators, and the combined read is leaning cautious, so trend continuation still needs confirmation.`;
+  } else {
+    summary = isZh
+      ? `当前已启用 ${input.activeIndicators.length} 个指标，整体读数偏混合，更像震荡或等待确认阶段。`
+      : `There are ${input.activeIndicators.length} active indicators, and the combined read is mixed, which looks more like a waiting or consolidation phase.`;
+  }
 
   return {
-    bias,
-    regime: input.activeIndicators.length > 0
-      ? `${input.activeIndicators.length} indicator(s) active — rule-based summary`
-      : "No advanced indicators active — price action only",
-    bullishEvidence: bullish.length > 0 ? bullish : ["No clear bullish signals from active indicators"],
-    bearishEvidence: bearish.length > 0 ? bearish : ["No clear bearish signals from active indicators"],
-    conflicts,
-    confirmsNext: "Configure GEMINI_API_KEY for AI-powered setup interpretation",
-    invalidatesNext: "Configure GEMINI_API_KEY for AI-powered setup interpretation",
+    summary,
+    interpretations,
+    caveats,
     generatedAt: new Date().toISOString(),
     source: "fallback",
+    fallbackReason,
     indicatorsUsed,
     context: ctx,
     hasMacroContext,
@@ -699,10 +938,60 @@ function fallbackSetupAnalysis(
 
 function fallbackAnalysis(params: {
   symbol: string;
+  assetType: "stock" | "crypto";
   indicators: TechnicalIndicators;
+  locale?: "en" | "zh";
+  provider?: AppAiProvider;
+  noProviderConfigured?: boolean;
 }): AIAnalysis {
-  const { symbol, indicators } = params;
+  const { symbol, assetType, indicators } = params;
+  const locale = params.locale ?? "en";
+  const noProviderConfigured = params.noProviderConfigured ?? false;
   const bullish = indicators.trendRegime.includes("Uptrend");
+  const participationLabel = assetType === "crypto" ? "market participation" : "institutional activity";
+  const marketRiskLine = assetType === "crypto"
+    ? "Broader crypto market risk and sentiment shifts can pressure this asset quickly"
+    : "Broader market risk could pressure this name regardless of fundamentals";
+  const providerLabel = params.provider ? getAiProviderLabel(params.provider) : "AI provider";
+
+  if (locale === "zh") {
+    const zhParticipationLabel = assetType === "crypto" ? "市场参与度" : "机构参与度";
+    const zhMarketRiskLine = assetType === "crypto"
+      ? "更广泛的加密市场风险和情绪波动，可能会迅速压制该资产走势"
+      : "即使基本面稳定，整体市场风险也可能拖累该标的";
+    const zhRiskMessage = noProviderConfigured
+      ? "未检测到可用的 AI 提供方，当前显示规则回退结果"
+      : `${providerLabel} 本次未成功返回可用结果，当前显示规则回退结果`;
+    const zhConfigMessage = "请在 .env.local 中配置 GEMINI_API_KEY、OPENAI_API_KEY 或 ANTHROPIC_API_KEY 以启用完整 AI 分析";
+    const zhSummaryTail = noProviderConfigured
+      ? "当前摘要来自规则回退结果，如需 AI 分析请先配置可用的 AI 提供方。"
+      : `当前摘要来自规则回退结果，${providerLabel} 本次未能成功完成分析。`;
+
+    return {
+      bullCase: [
+        bullish
+          ? `${symbol} 处于确认中的上升趋势，MA50 高于 MA200`
+          : "超卖状态可能带来均值回归机会",
+        `RSI 为 ${indicators.rsi}，${indicators.rsi > 50 ? "动能偏强" : "可能正在筑底"}`,
+        `相对成交量为 ${indicators.relativeVolume}x，${indicators.relativeVolume > 1 ? `对${zhParticipationLabel}形成确认` : "仍需要更强的量能确认"}`,
+      ],
+      bearCase: [
+        !bullish ? `${symbol} 目前位于关键均线下方` : "价格相对 MA50 已有一定延伸，回撤风险上升",
+        indicators.rsi > 70 ? "RSI 处于超买区，短线动能可能降温" : "量能确认不足，强趋势仍需进一步验证",
+        zhMarketRiskLine,
+      ],
+      risks: [
+        zhRiskMessage,
+        zhConfigMessage,
+      ],
+      recommendation: indicators.setupScore >= 70 ? "Buy" : indicators.setupScore >= 50 ? "Neutral" : "Sell",
+      confidence: "Low",
+      summary: `${symbol} 当前的 setup score 为 ${indicators.setupScore}/100（${indicators.setupLabel}）。趋势为 ${indicators.trendRegime}，RSI 为 ${indicators.rsi}。${zhSummaryTail}`,
+      generatedAt: new Date().toISOString(),
+      locale,
+      source: "fallback",
+    };
+  }
 
   return {
     bullCase: [
@@ -710,20 +999,24 @@ function fallbackAnalysis(params: {
         ? `${symbol} is in a confirmed uptrend with MA50 above MA200`
         : "Oversold conditions may present a mean-reversion opportunity",
       `RSI at ${indicators.rsi} is ${indicators.rsi > 50 ? "in bullish momentum territory" : "building base"}`,
-      `Relative volume of ${indicators.relativeVolume}x ${indicators.relativeVolume > 1 ? "confirms institutional activity" : "needs improvement"}`,
+      `Relative volume of ${indicators.relativeVolume}x ${indicators.relativeVolume > 1 ? `confirms ${participationLabel}` : "needs improvement"}`,
     ],
     bearCase: [
       !bullish ? `${symbol} is trading below key moving averages` : "Extended position above MA50 raises pullback risk",
       indicators.rsi > 70 ? "RSI in overbought territory — momentum may cool" : "Volume confirmation lacking for a strong move",
-      "Broader market risk could pressure this name regardless of fundamentals",
+      marketRiskLine,
     ],
     risks: [
-      "AI analysis unavailable — showing rule-based fallback",
-      "Configure GEMINI_API_KEY in .env.local for full AI-powered analysis",
+      noProviderConfigured
+        ? "No AI provider is configured — showing rule-based fallback"
+        : `${providerLabel} did not return a usable result, so a rule-based fallback is shown`,
+      "Configure GEMINI_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY in .env.local for full AI-powered analysis",
     ],
     recommendation: indicators.setupScore >= 70 ? "Buy" : indicators.setupScore >= 50 ? "Neutral" : "Sell",
     confidence: "Low",
-    summary: `${symbol} has a setup score of ${indicators.setupScore}/100 (${indicators.setupLabel}). Trend: ${indicators.trendRegime}. RSI: ${indicators.rsi}. This is a rule-based fallback — configure Gemini for AI analysis.`,
+    summary: `${symbol} has a setup score of ${indicators.setupScore}/100 (${indicators.setupLabel}). Trend: ${indicators.trendRegime}. RSI: ${indicators.rsi}. This ${assetType === "crypto" ? "digital asset" : "stock"} summary is rule-based fallback output${noProviderConfigured ? " because no AI provider is configured." : ` because ${providerLabel} did not return a usable response.`}`,
     generatedAt: new Date().toISOString(),
+    locale,
+    source: "fallback",
   };
 }

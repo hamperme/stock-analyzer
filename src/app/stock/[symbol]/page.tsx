@@ -3,6 +3,8 @@
 import { useEffect, useState, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { ArrowLeft, TrendingUp, TrendingDown, RefreshCw } from "lucide-react";
+import { useSettings } from "@/components/app/SettingsProvider";
+import { getAssetType } from "@/lib/assets";
 import { StockChart } from "@/components/stock/StockChart";
 import type { RangeValue, IntervalValue } from "@/components/stock/StockChart";
 import { TechnicalPanel } from "@/components/stock/TechnicalPanel";
@@ -20,6 +22,7 @@ interface StockData {
 export default function StockDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const { dict } = useSettings();
   const symbol = (params.symbol as string).toUpperCase();
 
   const [stockData, setStockData] = useState<StockData | null>(null);
@@ -79,7 +82,7 @@ export default function StockDetailPage() {
     return (
       <div className="flex min-h-[60vh] flex-col items-center justify-center gap-3">
         <LoadingSpinner size="lg" />
-        <p className="text-sm text-neutral">Loading {symbol}…</p>
+        <p className="text-sm text-neutral">{dict.stockDetail.loading(symbol)}</p>
       </div>
     );
   }
@@ -88,20 +91,20 @@ export default function StockDetailPage() {
     return (
       <div className="flex min-h-[60vh] flex-col items-center justify-center gap-4">
         <div className="rounded-xl border border-bear/30 bg-bear/10 p-6 text-center">
-          <p className="text-base font-semibold text-bear">Failed to load {symbol}</p>
+          <p className="text-base font-semibold text-bear">{dict.stockDetail.failed(symbol)}</p>
           <p className="mt-1 text-sm text-neutral">{error}</p>
           <div className="mt-4 flex gap-3 justify-center">
             <button
               onClick={fetchStock}
               className="flex items-center gap-2 rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-white hover:bg-accent/90"
             >
-              <RefreshCw className="h-4 w-4" /> Retry
+              <RefreshCw className="h-4 w-4" /> {dict.common.retry}
             </button>
             <button
               onClick={() => router.push("/")}
               className="flex items-center gap-2 rounded-lg border border-surface-border px-4 py-2 text-sm text-neutral hover:bg-surface-elevated"
             >
-              Back to Dashboard
+              {dict.stockDetail.backToDashboard}
             </button>
           </div>
         </div>
@@ -113,6 +116,7 @@ export default function StockDetailPage() {
 
   const { quote, indicators } = stockData;
   const isUp = quote.changePercent >= 0;
+  const assetType = quote.assetType ?? getAssetType(quote.symbol);
 
   return (
     <div className="space-y-5">
@@ -123,13 +127,18 @@ export default function StockDetailPage() {
           className="mb-4 flex items-center gap-1.5 text-sm text-neutral hover:text-slate-200 transition-colors"
         >
           <ArrowLeft className="h-4 w-4" />
-          Back to Dashboard
+          {dict.stockDetail.backToDashboard}
         </button>
 
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <div className="flex items-center gap-3">
               <h1 className="text-3xl font-black text-slate-100">{quote.symbol}</h1>
+              <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold uppercase tracking-wide ${
+                assetType === "crypto" ? "bg-amber-500/15 text-amber-300" : "bg-sky-500/15 text-sky-300"
+              }`}>
+                {assetType === "crypto" ? dict.common.crypto : dict.common.stock}
+              </span>
               <span
                 className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-bold ${
                   isUp ? "bg-bull/15 text-bull" : "bg-bear/15 text-bear"
@@ -147,7 +156,7 @@ export default function StockDetailPage() {
               ${quote.price.toFixed(2)}
             </p>
             <p className={`text-sm font-semibold ${isUp ? "text-bull" : "text-bear"}`}>
-              {isUp ? "+" : ""}{quote.change.toFixed(2)} today
+              {isUp ? "+" : ""}{quote.change.toFixed(2)} {dict.stockDetail.today}
             </p>
             <p className="text-xs text-neutral">{quote.currency}</p>
           </div>

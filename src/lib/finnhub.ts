@@ -11,6 +11,8 @@
 
 import https from "https";
 import { cache, TTL } from "./cache";
+import { isCryptoSymbol } from "./assets";
+import { getQuote as getYahooQuote, getNews as getYahooNews } from "./yahoo-finance";
 import type { StockQuote, HistoricalBar, NewsItem, NewsTag } from "./types";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -19,6 +21,12 @@ function getKey(): string {
   const key = process.env.FINNHUB_API_KEY;
   if (!key) throw new Error("FINNHUB_API_KEY is not set in .env.local");
   return key;
+}
+
+function isUsableQuotePayload(payload: unknown): payload is { c: number; pc?: number; dp?: number; h?: number; l?: number } {
+  if (!payload || typeof payload !== "object") return false;
+  const quote = payload as { c?: unknown };
+  return typeof quote.c === "number" && Number.isFinite(quote.c) && quote.c > 0;
 }
 
 // ─── Global request throttle ─────────────────────────────────────────────────
@@ -110,6 +118,18 @@ export async function getQuote(symbol: string): Promise<StockQuote> {
   const cached = cache.get<StockQuote>(cacheKey);
   if (cached) return cached;
 
+  if (isCryptoSymbol(symbol)) {
+    const cryptoQuote = await getYahooQuote(symbol);
+    cache.set(cacheKey, cryptoQuote, TTL.QUOTE);
+    return cryptoQuote;
+  }
+
+  if (!process.env.FINNHUB_API_KEY) {
+    const fallbackQuote = await getYahooQuote(symbol);
+    cache.set(cacheKey, fallbackQuote, TTL.QUOTE);
+    return fallbackQuote;
+  }
+
   const token = getKey();
 
   const [quoteData, profileData] = await Promise.allSettled([
@@ -124,6 +144,25 @@ export async function getQuote(symbol: string): Promise<StockQuote> {
 
   if (quoteData.status === "rejected") {
     console.warn(`[finnhub] Quote failed for ${symbol}:`, quoteData.reason?.message);
+  }
+
+  if (!isUsableQuotePayload(q)) {
+    const reason = quoteData.status === "rejected"
+      ? quoteData.reason?.message ?? "unknown quote error"
+      : `invalid quote payload: ${JSON.stringify(q).slice(0, 120)}`;
+    console.warn(`[finnhub] Falling back to Yahoo quote for ${symbol}: ${reason}`);
+
+    const fallbackQuote = await getYahooQuote(symbol);
+    const mergedQuote: StockQuote = {
+      ...fallbackQuote,
+      shortName: p.name ?? fallbackQuote.shortName,
+      longName: p.name ?? fallbackQuote.longName,
+      marketCap: p.marketCapitalization ? p.marketCapitalization * 1_000_000 : fallbackQuote.marketCap,
+      currency: p.currency ?? fallbackQuote.currency,
+    };
+
+    cache.set(cacheKey, mergedQuote, TTL.QUOTE);
+    return mergedQuote;
   }
 
   const price: number = q.c ?? 0;
@@ -231,6 +270,12 @@ export async function getNews(symbol: string): Promise<NewsItem[]> {
   const cached = cache.get<NewsItem[]>(cacheKey);
   if (cached) return cached;
 
+  if (isCryptoSymbol(symbol)) {
+    const cryptoNews = await getYahooNews(symbol);
+    cache.set(cacheKey, cryptoNews, TTL.NEWS);
+    return cryptoNews;
+  }
+
   try {
     const token = getKey();
     const to = new Date().toISOString().split("T")[0];
@@ -254,6 +299,8 @@ export async function getNews(symbol: string): Promise<NewsItem[]> {
     return items;
   } catch (err) {
     console.error(`[finnhub] News failed for ${symbol}:`, (err as Error).message);
-    return [];
+    const fallbackNews = await getYahooNews(symbol);
+    cache.set(cacheKey, fallbackNews, TTL.NEWS);
+    return fallbackNews;
   }
 }

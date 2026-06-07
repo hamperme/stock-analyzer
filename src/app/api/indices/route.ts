@@ -9,15 +9,12 @@
 import { NextResponse } from "next/server";
 import https from "https";
 import { cache, TTL } from "@/lib/cache";
+import { normalizeDashboardMarket } from "@/lib/app-settings";
+import { getMarketIndexDefinitions } from "@/lib/market-indices";
 import { loadIndices, saveIndices } from "@/lib/store";
 import type { MarketIndex } from "@/lib/types";
 
-const INDEX_SYMBOLS: Array<{ symbol: string; name: string }> = [
-  { symbol: "^GSPC", name: "S&P 500" },
-  { symbol: "^DJI",  name: "Dow Jones" },
-  { symbol: "^IXIC", name: "Nasdaq" },
-  { symbol: "^RUT",  name: "Russell 2000" },
-];
+export const dynamic = "force-dynamic";
 
 function httpsGet(url: string): Promise<unknown> {
   return new Promise((resolve, reject) => {
@@ -49,19 +46,25 @@ async function fetchIndex(symbol: string, name: string): Promise<MarketIndex> {
   return { symbol, name, price, change, changePercent };
 }
 
-export async function GET() {
+export async function GET(request: Request) {
+  const { searchParams } = new URL(request.url);
+  const market = normalizeDashboardMarket(searchParams.get("market"));
+
   // 1. In-memory cache
-  const cacheKey = "market:indices";
+  const cacheKey = `market:indices:${market}`;
   const memCached = cache.get<MarketIndex[]>(cacheKey);
-  if (memCached) return NextResponse.json({ data: memCached, error: null, source: "cache" });
+  if (memCached) {
+    return NextResponse.json({ data: memCached, error: null, market, source: "cache" });
+  }
 
   // 2. SQLite store
-  const stored = loadIndices();
+  const stored = loadIndices(market);
   if (stored && stored.data.length > 0) {
     cache.set(cacheKey, stored.data, TTL.INDICES);
     return NextResponse.json({
       data: stored.data,
       error: null,
+      market,
       cachedAt: stored.updatedAt,
       stale: stored.stale,
       source: "store",
@@ -71,20 +74,25 @@ export async function GET() {
   // 3. Seed fetch — indices are just 4 Yahoo requests, acceptable for first load
   try {
     const results = await Promise.allSettled(
-      INDEX_SYMBOLS.map(({ symbol, name }) => fetchIndex(symbol, name))
+      getMarketIndexDefinitions(market).map(({ symbol, name }) => fetchIndex(symbol, name))
     );
     const indices = results
       .filter((r): r is PromiseFulfilledResult<MarketIndex> => r.status === "fulfilled")
       .map((r) => r.value);
 
-    cache.set(cacheKey, indices, TTL.INDICES);
-    if (indices.length > 0) saveIndices(indices);
+    if (indices.length === 0) {
+      throw new Error("All index seed requests failed");
+    }
 
-    return NextResponse.json({ data: indices, error: null, source: "live-seed" });
+    cache.set(cacheKey, indices, TTL.INDICES);
+    saveIndices(indices, market);
+
+    return NextResponse.json({ data: indices, error: null, market, source: "live-seed" });
   } catch (err) {
     console.error("[indices]", err);
     return NextResponse.json({
       data: [],
+      market,
       error: "Failed to fetch indices — run Full Refresh.",
       source: "empty",
     });

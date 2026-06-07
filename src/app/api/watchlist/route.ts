@@ -1,33 +1,85 @@
 /**
  * GET /api/watchlist
+ * POST /api/watchlist
+ * DELETE /api/watchlist
  *
- * Snapshot-first: returns precomputed watchlist from SQLite store.
- * NEVER makes live provider calls — page loads must be instant and free.
- * If the store is empty, returns an empty list with a hint to run /api/refresh.
+ * Snapshot-first watchlist data plus persistent symbol management.
  */
 
+import { revalidatePath } from "next/cache";
 import { NextResponse } from "next/server";
-import { loadWatchlist } from "@/lib/store";
+import { getWatchlistPayload } from "@/lib/dashboard-data";
+import { getWatchlistSymbols, rebuildWatchlistSnapshot, refreshSymbolData } from "@/lib/refresh";
+import { saveWatchlistSymbols } from "@/lib/store";
+
+export const dynamic = "force-dynamic";
+
+function buildWatchlistResponse() {
+  return NextResponse.json(getWatchlistPayload());
+}
 
 export async function GET() {
-  const stored = loadWatchlist();
+  return buildWatchlistResponse();
+}
 
-  if (stored && stored.data.length > 0) {
-    return NextResponse.json({
-      data: stored.data,
-      error: null,
-      cachedAt: stored.updatedAt,
-      stale: stored.stale,
-      source: "store",
-    });
+export async function POST(req: Request) {
+  let symbol: string;
+  try {
+    const body = await req.json();
+    symbol = String(body?.symbol ?? "").trim().toUpperCase();
+  } catch {
+    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
 
-  // Store is empty — no live fallback, just tell the client to refresh
+  if (!symbol) {
+    return NextResponse.json({ error: "Symbol is required" }, { status: 400 });
+  }
+
+  const currentSymbols = getWatchlistSymbols();
+  if (currentSymbols.includes(symbol)) {
+    return buildWatchlistResponse();
+  }
+
+  const result = await refreshSymbolData(symbol);
+  if (!result.quote) {
+    const firstError = result.errors[0] ?? `Unable to add ${symbol}`;
+    return NextResponse.json(
+      { error: firstError.replace(/^quote:\s*/i, "") },
+      { status: 400 }
+    );
+  }
+
+  saveWatchlistSymbols([...currentSymbols, symbol]);
+  rebuildWatchlistSnapshot();
+  revalidatePath("/");
+
   return NextResponse.json({
-    data: [],
-    error: "No watchlist data yet — click Full Refresh to populate.",
-    cachedAt: null,
-    stale: false,
-    source: "empty",
+    ...getWatchlistPayload(),
+    added: symbol,
+    refresh: result,
+  });
+}
+
+export async function DELETE(req: Request) {
+  let symbol: string;
+  try {
+    const body = await req.json();
+    symbol = String(body?.symbol ?? "").trim().toUpperCase();
+  } catch {
+    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+  }
+
+  if (!symbol) {
+    return NextResponse.json({ error: "Symbol is required" }, { status: 400 });
+  }
+
+  const nextSymbols = getWatchlistSymbols().filter((item) => item !== symbol);
+  saveWatchlistSymbols(nextSymbols);
+  rebuildWatchlistSnapshot(nextSymbols);
+  revalidatePath("/");
+
+  return NextResponse.json({
+    ...getWatchlistPayload(),
+    removed: symbol,
   });
 }

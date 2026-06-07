@@ -11,8 +11,10 @@
  */
 
 import { NextResponse } from "next/server";
+import { normalizeLocale } from "@/lib/app-settings";
+import { getAssetType } from "@/lib/assets";
 import { cache } from "@/lib/cache";
-import { generateSetupAnalysis, getGeminiStatus } from "@/lib/gemini";
+import { generateSetupAnalysis, getAiStatus } from "@/lib/gemini";
 import type {
   SetupAnalysisInput,
   SetupAnalysis,
@@ -112,11 +114,14 @@ function macroFingerprint(mc: MacroContextPayload | null): string {
 
 function hashInput(input: SetupAnalysisInput): string {
   const key = JSON.stringify({
+    v: 2,
     s: input.symbol,
+    l: input.locale ?? "en",
+    p: input.provider ?? "gemini",
     r: input.range,
     i: input.interval,
     t: input.chartType,
-    p: Math.round(input.price * 100),
+    px: Math.round(input.price * 100),
     // Structured indicator fingerprints — captures regime-level changes
     // in each indicator without being sensitive to decimal noise
     a: input.activeIndicators.map(indicatorFingerprint).sort(),
@@ -132,13 +137,14 @@ export async function POST(
   { params }: { params: { symbol: string } }
 ) {
   const symbol = params.symbol.toUpperCase();
-  const geminiStatus = getGeminiStatus();
 
   let input: SetupAnalysisInput;
   try {
     input = await req.json();
     // Normalise symbol
     input.symbol = symbol;
+    input.assetType = getAssetType(symbol);
+    input.locale = normalizeLocale(input.locale);
   } catch {
     return NextResponse.json(
       { data: null, error: "Invalid request body" },
@@ -154,6 +160,9 @@ export async function POST(
     );
   }
 
+  const aiStatus = getAiStatus(input.provider);
+  input.provider = aiStatus.provider;
+
   // Check in-memory cache
   const cacheKey = hashInput(input);
   const cached = cache.get<SetupAnalysis>(cacheKey);
@@ -162,7 +171,7 @@ export async function POST(
       data: cached,
       error: null,
       source: "cache",
-      _debug: { ...geminiStatus, geminiCalled: false },
+      _debug: { ...aiStatus, aiCalled: false },
     });
   }
 
@@ -173,8 +182,8 @@ export async function POST(
     return NextResponse.json({
       data: result,
       error: null,
-      source: result.source === "gemini" ? "generated" : "fallback",
-      _debug: { ...geminiStatus, geminiCalled: true },
+      source: result.source !== "fallback" ? "generated" : "fallback",
+      _debug: { ...aiStatus, aiCalled: true, aiSource: result.source },
     });
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);

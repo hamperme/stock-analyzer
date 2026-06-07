@@ -19,9 +19,9 @@ import {
   Cell,
 } from "recharts";
 import { format, parseISO, formatDistanceToNow } from "date-fns";
+import { zhCN } from "date-fns/locale";
 import {
   ChevronDown,
-  ChevronRight,
   Activity,
   AlertTriangle,
   BarChart3,
@@ -32,11 +32,7 @@ import {
   Crosshair,
   Sparkles,
   Loader2,
-  TrendingUp,
-  TrendingDown,
   Eye,
-  Minus,
-  AlertOctagon,
 } from "lucide-react";
 import type { ChartDataPoint, SetupAnalysis, SetupAnalysisInput, ActiveIndicatorSnapshot, IndicatorStructuredData, MacroContextPayload } from "@/lib/types";
 import {
@@ -50,6 +46,7 @@ import {
   calculateFibExtensionLevels,
   calculateIchimoku,
 } from "@/lib/calculations";
+import { useSettings } from "@/components/app/SettingsProvider";
 
 // ─── Range & Interval Options ────────────────────────────────────────────────
 
@@ -599,6 +596,7 @@ export function StockChart({
   loading,
   error,
 }: Props) {
+  const { locale, aiProvider } = useSettings();
   const [localRange, setLocalRange] = useState<RangeValue>(activeRange);
   const [localInterval, setLocalInterval] = useState<IntervalValue>(activeInterval);
   const [indicators, setIndicators] = useState<IndicatorState>(DEFAULT_INDICATORS);
@@ -629,6 +627,7 @@ export function StockChart({
   const [setupAnalysis, setSetupAnalysis] = useState<SetupAnalysis | null>(null);
   const [setupLoading, setSetupLoading] = useState(false);
   const [setupError, setSetupError] = useState<string | null>(null);
+  const previousSettingsRef = useRef({ locale, aiProvider });
 
   const range = onRangeChange ? activeRange : localRange;
   const interval = onIntervalChange ? activeInterval : localInterval;
@@ -976,6 +975,8 @@ export function StockChart({
 
     const input: SetupAnalysisInput = {
       symbol,
+      locale,
+      provider: aiProvider,
       price,
       range,
       interval,
@@ -998,13 +999,26 @@ export function StockChart({
     } finally {
       setSetupLoading(false);
     }
-  }, [symbol, data, indicators, anchors, range, interval, chartType]);
+  }, [symbol, data, indicators, anchors, range, interval, chartType, locale, aiProvider]);
 
   // Clear setup analysis when indicators or range change
   useEffect(() => {
     setSetupAnalysis(null);
     setSetupError(null);
   }, [indicators, range, interval, chartType]);
+
+  useEffect(() => {
+    if (
+      previousSettingsRef.current.locale === locale &&
+      previousSettingsRef.current.aiProvider === aiProvider
+    ) {
+      return;
+    }
+    previousSettingsRef.current = { locale, aiProvider };
+    if (setupAnalysis && !setupLoading) {
+      void analyzeSetup();
+    }
+  }, [locale, aiProvider, analyzeSetup, setupAnalysis, setupLoading]);
 
   // ─── Derived counts ─────────────────────────────────────────────────────
   const overlayCount = useMemo(() =>
@@ -1117,7 +1131,6 @@ export function StockChart({
     axisLine: false, tickLine: false, minTickGap: 40,
   }), [enriched.length]);
 
-  const xAxisHidden = useMemo(() => ({ dataKey: "date" as const, hide: true }), []);
   const oscMargin = { top: 4, right: CHART_MARGIN.right, bottom: 0, left: CHART_MARGIN.left };
 
   // ─── Fib collision resolution (must run before early returns) ──────────
@@ -1316,7 +1329,9 @@ export function StockChart({
             <div className="border-t border-white/[0.06] pt-4">
               <div className="flex items-center gap-1.5 mb-2.5">
                 <Sparkles className="h-3.5 w-3.5 text-accent/70" />
-                <span className="text-[10px] font-bold uppercase tracking-widest text-neutral/60">Setup Interpretation</span>
+                <span className="text-[10px] font-bold uppercase tracking-widest text-neutral/60">
+                  {locale === "zh" ? "指标解读" : "Setup Interpretation"}
+                </span>
               </div>
 
               <button
@@ -1329,12 +1344,18 @@ export function StockChart({
                 }`}
               >
                 {setupLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-                {setupLoading ? "Analyzing…" : setupAnalysis ? "Re-analyze Setup" : "Analyze Current Setup"}
+                {setupLoading
+                  ? (locale === "zh" ? "分析中…" : "Analyzing…")
+                  : setupAnalysis
+                  ? (locale === "zh" ? "重新解读" : "Re-analyze Setup")
+                  : (locale === "zh" ? "解读当前指标" : "Analyze Current Setup")}
               </button>
 
               {activeCount > 0 && !setupAnalysis && !setupLoading && (
                 <p className="mt-1.5 text-[10px] text-neutral/40">
-                  Analyzes {activeCount} active indicator{activeCount > 1 ? "s" : ""} on the {range.toUpperCase()} / {interval} chart
+                  {locale === "zh"
+                    ? `将解读 ${range.toUpperCase()} / ${interval} 图表上已启用的 ${activeCount} 个指标`
+                    : `Analyzes ${activeCount} active indicator${activeCount > 1 ? "s" : ""} on the ${range.toUpperCase()} / ${interval} chart`}
                 </p>
               )}
 
@@ -1346,98 +1367,61 @@ export function StockChart({
 
               {setupAnalysis && !setupLoading && (
                 <div className="mt-3 space-y-2.5">
-                  {/* Bias + Regime banner */}
+                  {/* Source banner */}
                   <div className="flex items-center justify-between rounded-lg border border-surface-border bg-surface-elevated/40 px-3 py-2">
                     <div className="flex items-center gap-2">
-                      <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-bold ${
-                        setupAnalysis.bias === "Bullish" ? "bg-bull/15 text-bull"
-                        : setupAnalysis.bias === "Bearish" ? "bg-bear/15 text-bear"
-                        : setupAnalysis.bias === "Mixed" ? "bg-amber-500/15 text-amber-400"
-                        : "bg-slate-500/15 text-slate-400"
-                      }`}>
-                        {setupAnalysis.bias === "Bullish" ? <TrendingUp className="h-3 w-3" />
-                        : setupAnalysis.bias === "Bearish" ? <TrendingDown className="h-3 w-3" />
-                        : <Minus className="h-3 w-3" />}
-                        {setupAnalysis.bias}
+                      <span className="inline-flex items-center rounded-full bg-accent/10 px-2 py-0.5 text-[11px] font-bold text-accent">
+                        {setupAnalysis.source !== "fallback" ? "AI" : locale === "zh" ? "规则回退" : "Rule-based"}
                       </span>
                       <span className="text-[10px] text-neutral/60">
-                        {setupAnalysis.source === "gemini" ? "AI" : "Rule-based"}
+                        {setupAnalysis.indicatorsUsed.length} {locale === "zh" ? `个指标` : `indicator${setupAnalysis.indicatorsUsed.length !== 1 ? "s" : ""}`}
                       </span>
                     </div>
                     <span className="text-[10px] text-neutral/40 capitalize">
-                      {setupAnalysis.context.chartType} chart
+                      {setupAnalysis.context.chartType === "candle"
+                        ? (locale === "zh" ? "蜡烛图" : "Candle Chart")
+                        : (locale === "zh" ? "折线图" : "Line Chart")}
                     </span>
                   </div>
 
-                  {/* Regime */}
-                  {setupAnalysis.regime && (
-                    <p className="text-xs leading-relaxed text-slate-300">{setupAnalysis.regime}</p>
+                  {/* Summary */}
+                  {setupAnalysis.summary && (
+                    <p className="text-xs leading-relaxed text-slate-300">{setupAnalysis.summary}</p>
                   )}
 
-                  {/* Evidence grid */}
-                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                    {setupAnalysis.bullishEvidence.length > 0 && (
-                      <div className="rounded-lg border border-emerald-500/15 bg-emerald-500/5 p-2">
-                        <div className="mb-1 flex items-center gap-1 text-[10px] font-bold uppercase text-emerald-400">
-                          <TrendingUp className="h-3 w-3" /> Bullish
-                        </div>
-                        <ul className="space-y-1">
-                          {setupAnalysis.bullishEvidence.map((e, i) => (
-                            <li key={i} className="flex gap-1.5 text-[11px] leading-relaxed text-slate-300">
-                              <span className="mt-1 h-1 w-1 shrink-0 rounded-full bg-emerald-400" />
-                              {e}
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-
-                    {setupAnalysis.bearishEvidence.length > 0 && (
-                      <div className="rounded-lg border border-red-500/15 bg-red-500/5 p-2">
-                        <div className="mb-1 flex items-center gap-1 text-[10px] font-bold uppercase text-red-400">
-                          <TrendingDown className="h-3 w-3" /> Bearish
-                        </div>
-                        <ul className="space-y-1">
-                          {setupAnalysis.bearishEvidence.map((e, i) => (
-                            <li key={i} className="flex gap-1.5 text-[11px] leading-relaxed text-slate-300">
-                              <span className="mt-1 h-1 w-1 shrink-0 rounded-full bg-red-400" />
-                              {e}
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Conflicts */}
-                  {setupAnalysis.conflicts.length > 0 && (
-                    <div className="rounded-lg border border-amber-500/15 bg-amber-500/5 p-2">
-                      <div className="mb-1 flex items-center gap-1 text-[10px] font-bold uppercase text-amber-400">
-                        <AlertOctagon className="h-3 w-3" /> Signal Conflicts
+                  {/* Interpretations */}
+                  {setupAnalysis.interpretations.length > 0 && (
+                    <div className="rounded-lg border border-accent/15 bg-accent/5 p-2.5">
+                      <div className="mb-1.5 flex items-center gap-1 text-[10px] font-bold uppercase text-accent/80">
+                        <Eye className="h-3 w-3" /> {locale === "zh" ? "指标在说什么" : "Indicator Read"}
                       </div>
                       <ul className="space-y-1">
-                        {setupAnalysis.conflicts.map((c, i) => (
-                          <li key={i} className="text-[11px] leading-relaxed text-slate-400">{c}</li>
+                        {setupAnalysis.interpretations.map((item, i) => (
+                          <li key={i} className="flex gap-1.5 text-[11px] leading-relaxed text-slate-300">
+                            <span className="mt-1 h-1 w-1 shrink-0 rounded-full bg-accent/70" />
+                            {item}
+                          </li>
                         ))}
                       </ul>
                     </div>
                   )}
 
-                  {/* Confirms / Invalidates */}
-                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                    <div className="rounded-lg bg-surface-elevated/30 p-2">
-                      <div className="mb-0.5 flex items-center gap-1 text-[10px] font-bold uppercase text-emerald-400/70">
-                        <Eye className="h-3 w-3" /> Confirms
+                  {/* Caveats */}
+                  {setupAnalysis.caveats.length > 0 && (
+                    <div className="rounded-lg border border-amber-500/15 bg-amber-500/5 p-2.5">
+                      <div className="mb-1.5 flex items-center gap-1 text-[10px] font-bold uppercase text-amber-400">
+                        <AlertTriangle className="h-3 w-3" /> {locale === "zh" ? "补充说明" : "Notes"}
                       </div>
-                      <p className="text-[11px] leading-relaxed text-slate-400">{setupAnalysis.confirmsNext}</p>
+                      <ul className="space-y-1">
+                        {setupAnalysis.caveats.map((item, i) => (
+                          <li key={i} className="flex gap-1.5 text-[11px] leading-relaxed text-slate-400">
+                            <span className="mt-1 h-1 w-1 shrink-0 rounded-full bg-amber-400" />
+                            {item}
+                          </li>
+                        ))}
+                      </ul>
                     </div>
-                    <div className="rounded-lg bg-surface-elevated/30 p-2">
-                      <div className="mb-0.5 flex items-center gap-1 text-[10px] font-bold uppercase text-red-400/70">
-                        <AlertTriangle className="h-3 w-3" /> Invalidates
-                      </div>
-                      <p className="text-[11px] leading-relaxed text-slate-400">{setupAnalysis.invalidatesNext}</p>
-                    </div>
-                  </div>
+                  )}
 
                   {/* Context & Trust Footer */}
                   <div className="space-y-1.5 rounded-lg bg-surface-elevated/20 px-2.5 py-2">
@@ -1446,20 +1430,31 @@ export function StockChart({
                         {setupAnalysis.context.range.toUpperCase()} / {setupAnalysis.context.interval}
                       </span>
                       <span className="text-neutral/30">·</span>
-                      <span>{setupAnalysis.indicatorsUsed.length} indicator{setupAnalysis.indicatorsUsed.length !== 1 ? "s" : ""}</span>
+                      <span>
+                        {setupAnalysis.indicatorsUsed.length} {locale === "zh" ? `个指标` : `indicator${setupAnalysis.indicatorsUsed.length !== 1 ? "s" : ""}`}
+                      </span>
                       <span className="text-neutral/30">·</span>
                       <span className={setupAnalysis.hasMacroContext ? "text-accent/60" : "text-neutral/35"}>
-                        Macro: {setupAnalysis.hasMacroContext ? "included" : "not included"}
+                        {locale === "zh"
+                          ? `宏观：${setupAnalysis.hasMacroContext ? "已纳入" : "未纳入"}`
+                          : `Macro: ${setupAnalysis.hasMacroContext ? "included" : "not included"}`}
                       </span>
                       <span className="text-neutral/30">·</span>
                       <span>
-                        {setupAnalysis.source === "gemini" ? "AI" : "Rule-based"} · {(() => {
-                          try { return formatDistanceToNow(parseISO(setupAnalysis.generatedAt), { addSuffix: true }); }
-                          catch { return "just now"; }
+                        {(setupAnalysis.source !== "fallback" ? "AI" : locale === "zh" ? "规则回退" : "Rule-based")} · {(() => {
+                          try {
+                            return formatDistanceToNow(parseISO(setupAnalysis.generatedAt), {
+                              addSuffix: true,
+                              locale: locale === "zh" ? zhCN : undefined,
+                            });
+                          }
+                          catch { return locale === "zh" ? "刚刚" : "just now"; }
                         })()}
                       </span>
                     </div>
-                    <p className="text-[8px] text-neutral/30">AI-generated interpretation — not financial advice</p>
+                    <p className="text-[8px] text-neutral/30">
+                      {locale === "zh" ? "AI 生成的指标解读，仅供参考，不构成投资建议" : "AI-generated interpretation — not financial advice"}
+                    </p>
                   </div>
                 </div>
               )}

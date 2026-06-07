@@ -1,12 +1,12 @@
 # Stock-analyzer
 
-**AI-assisted stock analysis dashboard with advanced charting, macro regime context, and multi-source market data.**
+**AI-assisted market analysis dashboard for stocks and crypto, with advanced charting, macro regime context, and multi-source market data.**
 
 ---
 
 ## Overview
 
-StockPulse is a full-stack stock analysis tool built with Next.js 14. It combines real-time market data from multiple providers, a full suite of technical indicators rendered on interactive charts, a macro market regime engine that synthesizes treasury yields, volatility, breadth, and policy signals, and AI-powered setup interpretation via Google Gemini.
+StockPulse is a full-stack market analysis tool built with Next.js 14. It combines real-time market data from multiple providers, a full suite of technical indicators rendered on interactive charts, a macro market regime engine that synthesizes treasury yields, volatility, breadth, and policy signals, and AI-powered analysis that can run through Gemini, OpenAI, or Claude.
 
 The app is designed as a single-user analysis workstation — not a trading platform. It emphasizes transparent data sourcing, graceful degradation when APIs are unavailable, and honest confidence framing for all AI-generated outputs.
 
@@ -17,7 +17,7 @@ The app is designed as a single-user analysis workstation — not a trading plat
 ### Market Dashboard
 - Live market indices (S&P 500, Nasdaq, Dow Jones) with auto-refresh
 - Fear & Greed Index derived from VIX and S&P 500 momentum
-- Configurable watchlist with sortable columns — price, change, RSI, MA alignment, setup score
+- Configurable mixed watchlist with sortable columns — stocks and Yahoo-style crypto pairs such as `BTC-USD`
 - Manual refresh control with stale-data indicators
 
 ### Bull vs. Bear Macro Panel
@@ -27,9 +27,9 @@ The app is designed as a single-user analysis workstation — not a trading plat
 - Market breadth via SPY/RSP ETF divergence + watchlist advance/decline
 - Per-input signal transparency strip (live, derived, proxy, stale, missing)
 - Deterministic confidence scoring with weighted input coverage
-- AI-synthesized bull/bear narratives with watch items (Gemini) or rule-based fallback
+- AI-synthesized bull/bear narratives with watch items via your configured provider, or rule-based fallback
 
-### Stock Detail & Charting
+### Asset Detail & Charting
 - Line and candlestick chart modes
 - 7 time ranges (1D, 5D, 1M, 3M, 6M, 1Y, ALL) with 4 interval options (1H, 1D, 1W, 1M)
 - Moving averages: MA20, MA50, MA200 with color-coded overlays
@@ -52,7 +52,7 @@ The app is designed as a single-user analysis workstation — not a trading plat
 - Triggered manually via button — analyzes only what's visible on the chart
 - Output: bias, regime description, bullish/bearish evidence with cited values, signal conflicts, confirmation/invalidation scenarios
 - Content-hash-based caching with bucketed fingerprints to prevent stale hits
-- Gemini-powered with rule-based fallback
+- Provider-selectable AI with rule-based fallback
 
 ### Technical Panel
 - RSI with visual bar and zone labels
@@ -62,13 +62,13 @@ The app is designed as a single-user analysis workstation — not a trading plat
 - Setup score (0–100) with methodology transparency
 - 52-week range with distance indicators
 
-### AI Stock Analysis
-- Gemini-generated bull case, bear case, risks, recommendation, confidence level
+### AI Asset Analysis
+- AI-generated bull case, bear case, risks, recommendation, confidence level
 - Optional entry/stop-loss levels
 - Automatic fallback to rule-based analysis when API key is not configured
 
 ### News Panel
-- Stock-specific news from Finnhub
+- Symbol-specific headlines with stock and crypto support
 - Category tags: Earnings, Product Launch, Legal, Partnership, Analyst Rating, Executive Change, Market Sentiment
 - Sentiment classification (positive, neutral, negative)
 
@@ -87,7 +87,7 @@ The app is designed as a single-user analysis workstation — not a trading plat
 | Framework | Next.js 14 (App Router) |
 | Language | TypeScript (strict mode) |
 | UI | React 18, Tailwind CSS, Recharts |
-| AI | Google Gemini 2.5 Flash (`@google/genai`) |
+| AI | Gemini, OpenAI, or Claude (provider-selectable) |
 | Storage | SQLite via `better-sqlite3` (WAL mode) |
 | Data Providers | Finnhub (primary), Yahoo Finance (fallback), CNN Fear & Greed |
 | Icons | Lucide React |
@@ -157,7 +157,10 @@ Browser (React)
 ### Prerequisites
 - Node.js 18+ and npm
 - A Finnhub API key (free at [finnhub.io](https://finnhub.io/register))
-- A Gemini API key for AI features (free at [aistudio.google.com](https://aistudio.google.com/app/apikey))
+- At least one AI provider API key for AI features:
+  Gemini at [aistudio.google.com](https://aistudio.google.com/app/apikey),
+  OpenAI at [platform.openai.com](https://platform.openai.com/api-keys),
+  or Claude at [console.anthropic.com](https://console.anthropic.com/settings/keys)
 
 ### 1. Clone and install
 
@@ -178,6 +181,8 @@ Edit `.env.local` with your API keys:
 ```env
 FINNHUB_API_KEY=your_finnhub_key
 GEMINI_API_KEY=your_gemini_key
+# OPENAI_API_KEY=your_openai_key
+# ANTHROPIC_API_KEY=your_anthropic_key
 ```
 
 ### 3. Run
@@ -204,19 +209,24 @@ docker compose up -d
 | Variable | Required | Description |
 |---|---|---|
 | `FINNHUB_API_KEY` | Yes | Finnhub API key — primary data source for quotes, history, news |
-| `GEMINI_API_KEY` | Yes* | Google Gemini API key — powers AI analysis and setup interpretation |
-| `WATCHLIST_SYMBOLS` | No | Comma-separated ticker list (default: `AAPL,MSFT,GOOGL,NVDA,AMZN,META,TSLA,JPM,V,UNH`) |
+| `GEMINI_API_KEY` | No* | Google Gemini API key — enables Gemini in the AI provider picker |
+| `OPENAI_API_KEY` | No* | OpenAI API key — enables OpenAI in the AI provider picker |
+| `ANTHROPIC_API_KEY` | No* | Anthropic API key — enables Claude in the AI provider picker |
+| `GEMINI_MODEL` | No | Override the default Gemini model (`gemini-2.5-flash`) |
+| `OPENAI_MODEL` | No | Override the default OpenAI model (`gpt-4.1-mini`) |
+| `ANTHROPIC_MODEL` | No | Override the default Claude model (`claude-sonnet-4-20250514`) |
+| `WATCHLIST_SYMBOLS` | No | Comma-separated symbol list for stocks and/or Yahoo-style crypto pairs (default: `AAPL,MSFT,GOOGL,NVDA,AMZN,META,BTC-USD,ETH-USD,SOL-USD`) |
 | `TWELVEDATA_API_KEY` | No | Twelve Data key — supplementary indicator source when primary is rate-limited |
 | `ALPHA_VANTAGE_KEY` | No | Alpha Vantage key — reserved for future enhanced news |
 | `NEXT_PUBLIC_APP_URL` | No | Production URL for deployment |
 
-\* The app runs without `GEMINI_API_KEY` — AI features fall back to rule-based analysis.
+\* The app runs without any AI provider key — AI features fall back to rule-based analysis. If multiple provider keys are configured, users can choose among them in Settings.
 
 ---
 
 ## Usage
 
-1. **Dashboard** — View market indices, Fear & Greed, macro regime, and watchlist at a glance. Click the refresh button to pull fresh data.
+1. **Dashboard** — View market indices, Fear & Greed, the equity-focused macro regime panel, and a mixed stock/crypto watchlist at a glance. Click the refresh button to pull fresh data.
 
 2. **Stock detail** — Click any ticker to see the full chart, technical panel, AI analysis, and news. Switch between line and candlestick modes.
 
@@ -226,7 +236,7 @@ docker compose up -d
 
 5. **Andrews' Pitchfork** — Enable Pitchfork, then click three points on the chart to set anchors. The tool draws the full 5-line structure (median, tines, warning lines).
 
-6. **AI Setup Analysis** — With indicators active, click "Analyze Current Setup" in the indicator panel. The AI interprets only the indicators you have enabled, cites specific values, and notes conflicts. Macro context is included automatically when available.
+6. **AI Setup Analysis** — With indicators active, click "Analyze Current Setup" in the indicator panel. The AI interprets only the indicators you have enabled, cites specific values, and uses your selected AI provider from Settings. Macro context is included automatically when available.
 
 7. **Macro panel** — The dashboard's Bull vs. Bear panel shows the current macro regime with signal-level transparency. Each data input is labeled as live, derived, proxy, stale, or missing.
 

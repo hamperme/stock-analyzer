@@ -1,7 +1,12 @@
+import type { AppAiProvider } from "./app-settings";
+
 // ─── Market Data ──────────────────────────────────────────────────────────────
+
+export type AssetType = "stock" | "crypto";
 
 export interface StockQuote {
   symbol: string;
+  assetType?: AssetType;
   shortName: string;
   longName: string;
   price: number;
@@ -54,6 +59,7 @@ export interface TechnicalIndicators {
 
 export interface WatchlistEntry {
   symbol: string;
+  assetType?: AssetType;
   shortName: string;
   price: number;
   change: number;
@@ -66,6 +72,14 @@ export interface WatchlistEntry {
   rsi: number;
   setupScore: number;
   setupLabel: TechnicalIndicators["setupLabel"];
+}
+
+export interface WatchlistSearchResult {
+  symbol: string;
+  assetType: AssetType;
+  shortName: string;
+  longName: string;
+  exchange: string | null;
 }
 
 // ─── Market Indices ───────────────────────────────────────────────────────────
@@ -127,6 +141,8 @@ export interface AIAnalysis {
   targetEntry?: string;
   stopLoss?: string;
   generatedAt: string;
+  locale?: "en" | "zh";
+  source?: AppAiProvider | "fallback";
 }
 
 // ─── Setup Analysis (chart-context AI interpretation) ────────────────────────
@@ -134,6 +150,9 @@ export interface AIAnalysis {
 /** The structured payload sent from the chart to the setup-analysis endpoint */
 export interface SetupAnalysisInput {
   symbol: string;
+  assetType?: AssetType;
+  locale?: "en" | "zh";
+  provider?: AppAiProvider;
   price: number;
   range: string;
   interval: string;
@@ -258,15 +277,12 @@ export interface IndicatorStructuredData {
 
 /** The AI-generated setup interpretation */
 export interface SetupAnalysis {
-  bias: "Bullish" | "Bearish" | "Neutral" | "Mixed";
-  regime: string;
-  bullishEvidence: string[];
-  bearishEvidence: string[];
-  conflicts: string[];
-  confirmsNext: string;
-  invalidatesNext: string;
+  summary: string;
+  interpretations: string[];
+  caveats: string[];
   generatedAt: string;
-  source: "gemini" | "fallback";
+  source: AppAiProvider | "fallback";
+  fallbackReason?: "missing_key" | "generation_failed";
   /** Which indicators were analysed */
   indicatorsUsed: string[];
   /** Chart context this was generated for */
@@ -426,7 +442,7 @@ export interface MacroView {
   /** Deterministically computed confidence — not AI-generated */
   confidence: ConfidenceMeta;
   generatedAt: string;
-  source: "gemini" | "fallback";
+  source: AppAiProvider | "fallback";
   /** Human-readable data inputs that fed the synthesis */
   dataSources: string[];
   /** The structured snapshot that produced this view */

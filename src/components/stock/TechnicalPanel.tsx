@@ -1,5 +1,9 @@
+"use client";
+
+import { useSettings } from "@/components/app/SettingsProvider";
 import { Card, CardHeader, CardTitle } from "@/components/ui/Card";
-import { Badge } from "@/components/ui/Badge";
+import { SetupBadge } from "@/components/ui/Badge";
+import { getAssetType } from "@/lib/assets";
 import type { TechnicalIndicators, StockQuote } from "@/lib/types";
 
 interface Props {
@@ -57,7 +61,9 @@ function SetupScoreBar({ score }: { score: number }) {
 }
 
 export function TechnicalPanel({ indicators, quote, hasHistory = true }: Props) {
+  const { dict } = useSettings();
   const price = quote.price;
+  const assetType = quote.assetType ?? getAssetType(quote.symbol);
   const na = "—";
   const rsiColor =
     indicators.rsi > 70 ? "text-bear" : indicators.rsi < 30 ? "text-warn" : "text-bull";
@@ -66,13 +72,15 @@ export function TechnicalPanel({ indicators, quote, hasHistory = true }: Props) 
     : indicators.trendRegime === "Sideways"
     ? "text-warn"
     : "text-bear";
+  const rsiState =
+    indicators.rsi > 70 ? dict.technical.overbought : indicators.rsi < 30 ? dict.technical.oversold : dict.technical.healthy;
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Technical Indicators</CardTitle>
+        <CardTitle>{dict.technical.title}</CardTitle>
         <div className="flex items-center gap-2">
-          <span className="text-xs text-neutral">Score</span>
+          <span className="text-xs text-neutral">{dict.technical.score}</span>
           <span className="font-mono text-sm font-bold text-slate-200">{indicators.setupScore}/100</span>
         </div>
       </CardHeader>
@@ -80,17 +88,18 @@ export function TechnicalPanel({ indicators, quote, hasHistory = true }: Props) 
       {/* Banner when indicators are defaults, not computed */}
       {!hasHistory && (
         <div className="mb-3 rounded-lg border border-warn/20 bg-warn/5 px-3 py-2 text-xs text-warn/80">
-          Historical data temporarily unavailable — indicators are estimates only.
+          {dict.technical.estimatesOnly}
         </div>
       )}
 
       {/* Setup Score Bar */}
       <div className="mb-4">
         <div className="flex items-center justify-between text-xs text-neutral mb-1">
-          <span>Setup Quality</span>
-          <Badge variant={indicators.setupLabel === "Strong Setup" ? "strong" : indicators.setupLabel === "Watch" ? "watch" : indicators.setupLabel === "Avoid" ? "avoid" : "neutral"}>
-            {indicators.setupLabel}
-          </Badge>
+          <span>{dict.technical.setupQuality}</span>
+          <SetupBadge
+            label={indicators.setupLabel}
+            displayLabel={dict.watchlist.setupLabels[indicators.setupLabel]}
+          />
         </div>
         <SetupScoreBar score={indicators.setupScore} />
       </div>
@@ -102,7 +111,7 @@ export function TechnicalPanel({ indicators, quote, hasHistory = true }: Props) 
           <span className={`font-mono font-bold ${rsiColor}`}>
             {indicators.rsi.toFixed(1)}
             <span className="ml-1 text-neutral font-normal">
-              {indicators.rsi > 70 ? "Overbought" : indicators.rsi < 30 ? "Oversold" : "Healthy"}
+              {rsiState}
             </span>
           </span>
         </div>
@@ -117,8 +126,12 @@ export function TechnicalPanel({ indicators, quote, hasHistory = true }: Props) 
 
       {/* Trend + MAs */}
       <div className="space-y-0">
-        <Metric label="Trend Regime" value={indicators.trendRegime} color={regimeColor} />
-        <Metric label="Relative Volume" value={`${indicators.relativeVolume.toFixed(2)}x`}
+        <Metric
+          label={dict.technical.trendRegime}
+          value={dict.technical.trendLabels[indicators.trendRegime]}
+          color={regimeColor}
+        />
+        <Metric label={dict.technical.relativeVolume} value={`${indicators.relativeVolume.toFixed(2)}x`}
           color={indicators.relativeVolume >= 1.5 ? "text-accent" : "text-slate-400"} />
         <Metric label="MA20" value={`$${indicators.ma20.toFixed(2)}`}
           sub={price > indicators.ma20 ? "▲ above" : "▼ below"}
@@ -129,17 +142,17 @@ export function TechnicalPanel({ indicators, quote, hasHistory = true }: Props) 
         <Metric label="MA200" value={`$${indicators.ma200.toFixed(2)}`}
           sub={`${indicators.priceVsMa200Pct > 0 ? "+" : ""}${indicators.priceVsMa200Pct.toFixed(1)}%`}
           color={indicators.priceVsMa200Pct >= 0 ? "text-bull" : "text-bear"} />
-        <Metric label="52w High" value={hasHistory ? `$${indicators.high52w.toFixed(2)}` : na} />
-        <Metric label="52w Low" value={hasHistory ? `$${indicators.low52w.toFixed(2)}` : na} />
-        <Metric label="From 52w High"
+        <Metric label={dict.technical.high52w} value={hasHistory ? `$${indicators.high52w.toFixed(2)}` : na} />
+        <Metric label={dict.technical.low52w} value={hasHistory ? `$${indicators.low52w.toFixed(2)}` : na} />
+        <Metric label={dict.technical.from52wHigh}
           value={hasHistory ? `${indicators.distFrom52wHighPct.toFixed(1)}%` : na}
           color={hasHistory ? (indicators.distFrom52wHighPct > -10 ? "text-bull" : "text-bear") : "text-neutral/50"} />
-        {quote.beta && (
-          <Metric label="Beta" value={quote.beta.toFixed(2)} />
+        {assetType === "stock" && quote.beta && (
+          <Metric label={dict.technical.beta} value={quote.beta.toFixed(2)} />
         )}
-        {quote.marketCap && (
+        {assetType === "stock" && quote.marketCap && (
           <Metric
-            label="Market Cap"
+            label={dict.technical.marketCap}
             value={
               quote.marketCap >= 1e12
                 ? `$${(quote.marketCap / 1e12).toFixed(2)}T`

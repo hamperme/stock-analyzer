@@ -11,8 +11,10 @@
  */
 
 import { NextResponse } from "next/server";
+import { normalizeLocale } from "@/lib/app-settings";
 import { computeIndicators } from "@/lib/calculations";
-import { generateStockAnalysis, getGeminiStatus } from "@/lib/gemini";
+import { getAssetNoun, normalizeQuote } from "@/lib/assets";
+import { generateStockAnalysis, getAiStatus } from "@/lib/gemini";
 import { cache, TTL } from "@/lib/cache";
 import { loadAnalysis, saveAnalysis, loadQuote, loadHistory, loadNews } from "@/lib/store";
 import type { TechnicalIndicators } from "@/lib/types";
@@ -32,14 +34,28 @@ function fallbackIndicators(price: number): TechnicalIndicators {
  * (i.e. Gemini was NOT used). Heuristic: the fallback always sets confidence
  * to "Low" and includes a distinctive risks string.
  */
-function isFallbackAnalysis(analysis: { risks?: string[]; confidence?: string }): boolean {
+function isFallbackAnalysis(analysis: {
+  risks?: string[];
+  confidence?: string;
+  source?: string;
+  summary?: string;
+}): boolean {
+  if (analysis.source === "fallback") {
+    return true;
+  }
+
   if (analysis.confidence === "Low") {
-    const risksText = (analysis.risks ?? []).join(" ").toLowerCase();
+    const fallbackText = `${(analysis.risks ?? []).join(" ")} ${analysis.summary ?? ""}`.toLowerCase();
     if (
-      risksText.includes("rule-based fallback") ||
-      risksText.includes("no gemini api key") ||
-      risksText.includes("ai analysis unavailable") ||
-      risksText.includes("add gemini_api_key")
+      fallbackText.includes("rule-based fallback") ||
+      fallbackText.includes("no gemini api key") ||
+      fallbackText.includes("no ai provider") ||
+      fallbackText.includes("ai analysis unavailable") ||
+      fallbackText.includes("add gemini_api_key") ||
+      fallbackText.includes("规则回退") ||
+      fallbackText.includes("ai 分析暂不可用") ||
+      fallbackText.includes("启用 gemini") ||
+      fallbackText.includes("配置可用的 ai 提供方")
     ) {
       return true;
     }
@@ -54,9 +70,11 @@ export async function GET(
   const symbol = params.symbol.toUpperCase();
   const { searchParams } = new URL(req.url);
   const forceRefresh = searchParams.get("refresh") === "1";
+  const locale = normalizeLocale(searchParams.get("locale"));
+  const selectedProvider = searchParams.get("provider");
 
-  const geminiStatus = getGeminiStatus();
-  const cacheKey = `analysis:${symbol}`;
+  const aiStatus = getAiStatus(selectedProvider);
+  const cacheKey = `analysis:${symbol}:${locale}:${aiStatus.provider}`;
 
   // ── Skip cache/store on ?refresh=1 ─────────────────────────────────────────
   if (!forceRefresh) {
@@ -65,25 +83,25 @@ export async function GET(
     if (cached) {
       return NextResponse.json({
         data: cached, error: null, source: "cache",
-        _debug: { ...geminiStatus, geminiCalled: false },
+        _debug: { ...aiStatus, aiCalled: false, locale },
       });
     }
 
     // 2. SQLite store — serve if present, UNLESS it's a stale fallback and
     //    we now have a Gemini key (meaning we should regenerate with AI).
-    const stored = loadAnalysis(symbol);
+    const stored = loadAnalysis(symbol, locale, aiStatus.provider);
     if (stored) {
-      const shouldRegenerate = geminiStatus.hasKey && isFallbackAnalysis(stored.data);
+      const shouldRegenerate = aiStatus.hasKey && isFallbackAnalysis(stored.data);
       if (!shouldRegenerate) {
         cache.set(cacheKey, stored.data, TTL.ANALYSIS);
         return NextResponse.json({
           data: stored.data, error: null,
           cachedAt: stored.updatedAt, stale: stored.stale, source: "store",
-          _debug: { ...geminiStatus, geminiCalled: false, wasFallback: isFallbackAnalysis(stored.data) },
+          _debug: { ...aiStatus, aiCalled: false, wasFallback: isFallbackAnalysis(stored.data), locale },
         });
       }
       // Fall through to regeneration
-      console.log(`[analysis/${symbol}] Stored analysis is fallback and Gemini key is now present — regenerating`);
+      console.log(`[analysis/${symbol}] Stored analysis is fallback for locale=${locale} and provider=${aiStatus.provider} is available — regenerating`);
     }
   } else {
     // Clear in-memory cache so the fresh result replaces it
@@ -96,12 +114,12 @@ export async function GET(
     return NextResponse.json({
       data: null,
       error: `No data for ${symbol} — run Full Refresh first.`,
-      _debug: { ...geminiStatus, geminiCalled: false },
+      _debug: { ...aiStatus, aiCalled: false, locale },
     }, { status: 404 });
   }
 
   try {
-    const quote = sq.data;
+    const quote = normalizeQuote(sq.data);
     const sh = loadHistory(symbol);
     const sn = loadNews(symbol);
 
@@ -114,25 +132,29 @@ export async function GET(
 
     const result = await generateStockAnalysis({
       symbol: quote.symbol,
+      assetType: quote.assetType ?? "stock",
       shortName: quote.shortName,
       price: quote.price,
       changePercent: quote.changePercent,
       indicators,
       newsHeadlines,
+      locale,
+      provider: aiStatus.provider,
     });
 
     cache.set(cacheKey, result.analysis, TTL.ANALYSIS);
-    saveAnalysis(symbol, result.analysis);
+    saveAnalysis(symbol, result.analysis, locale, aiStatus.provider);
 
     return NextResponse.json({
       data: result.analysis,
-      error: result.geminiError ? `Gemini failed: ${result.geminiError} (showing fallback)` : null,
-      source: result.source === "gemini" ? "generated" : "fallback",
+      error: result.providerError ? `${aiStatus.label} failed: ${result.providerError} (showing fallback)` : null,
+      source: result.source !== "fallback" ? "generated" : "fallback",
       _debug: {
-        ...geminiStatus,
-        geminiCalled: true,
-        geminiSource: result.source,
-        geminiError: result.geminiError,
+        ...aiStatus,
+        aiCalled: true,
+        aiSource: result.source,
+        aiError: result.providerError,
+        locale,
       },
     });
   } catch (err) {
@@ -140,20 +162,20 @@ export async function GET(
     console.error(`[analysis/${symbol}]`, errMsg);
 
     // Return stale store data if available
-    const stored = loadAnalysis(symbol);
+    const stored = loadAnalysis(symbol, locale, aiStatus.provider);
     if (stored) {
       return NextResponse.json({
         data: stored.data,
         error: `Generation failed: ${errMsg} (showing cached)`,
         cachedAt: stored.updatedAt, stale: true, source: "store-stale",
-        _debug: { ...geminiStatus, geminiCalled: true, geminiError: errMsg },
+        _debug: { ...aiStatus, aiCalled: true, aiError: errMsg, locale },
       });
     }
 
     return NextResponse.json({
       data: null,
-      error: `Failed to generate analysis: ${errMsg}`,
-      _debug: { ...geminiStatus, geminiCalled: true, geminiError: errMsg },
+      error: `Failed to generate ${getAssetNoun(normalizeQuote(sq.data).assetType ?? "stock")} analysis: ${errMsg}`,
+      _debug: { ...aiStatus, aiCalled: true, aiError: errMsg, locale },
     }, { status: 500 });
   }
 }

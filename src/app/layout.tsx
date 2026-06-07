@@ -1,18 +1,28 @@
 import type { Metadata } from "next";
+import { cookies } from "next/headers";
 import { Inter } from "next/font/google";
 import Link from "next/link";
 import { BarChart2 } from "lucide-react";
+import { SettingsButton } from "@/components/app/SettingsButton";
+import { SettingsProvider } from "@/components/app/SettingsProvider";
+import { readAppSettings } from "@/lib/app-settings";
+import { getAiProviderLabel, getAvailableAiProviders } from "@/lib/ai-provider-server";
+import { getDictionary } from "@/lib/i18n";
 import "./globals.css";
 
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "StockPulse — Stock Analyzer",
-  description: "Real-time stock analysis with AI-powered insights, technical indicators, and market sentiment.",
-  keywords: ["stock analyzer", "technical analysis", "RSI", "moving averages", "fear and greed"],
+  title: "StockPulse — Market Analyzer",
+  description: "Real-time stock and crypto analysis with AI-powered insights, technical indicators, and market sentiment.",
+  keywords: ["stock analyzer", "crypto analyzer", "technical analysis", "RSI", "moving averages", "fear and greed"],
 };
 
-function Navbar() {
+function Navbar({
+  marketTagline,
+}: {
+  marketTagline: string;
+}) {
   return (
     <header className="sticky top-0 z-50 border-b border-surface-border bg-app-bg/90 backdrop-blur-md">
       <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3 sm:px-6">
@@ -24,8 +34,9 @@ function Navbar() {
         </Link>
         <div className="flex items-center gap-3 text-xs text-neutral">
           <span className="hidden sm:inline">
-            Data via Finnhub &amp; Yahoo Finance · AI via Gemini
+            {marketTagline}
           </span>
+          <SettingsButton />
           <a
             href="https://github.com/hamperme/stock-analyzer"
             target="_blank"
@@ -48,21 +59,39 @@ export default function RootLayout({
 }: {
   children: React.ReactNode;
 }) {
+  const availableAiProviders = getAvailableAiProviders();
+  const { locale, theme, aiProvider, market } = readAppSettings(cookies(), availableAiProviders);
+  const dict = getDictionary(locale);
+  const aiTagLabel = availableAiProviders.length > 0
+    ? getAiProviderLabel(aiProvider)
+    : locale === "zh"
+    ? "规则回退"
+    : "Rule-Based Fallback";
+  const marketTagline = dict.layout.marketTagline(aiTagLabel);
+
   return (
-    <html lang="en" className="dark">
+    <html lang={locale} className={theme}>
       <body className={inter.className}>
-        <Navbar />
-        <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
-          {children}
-        </main>
-        <footer className="mt-12 border-t border-surface-border py-6 text-center text-xs text-neutral/60">
-          <p>
-            StockPulse · Data for informational purposes only · Not financial advice ·{" "}
-            <a href="https://github.com/hamperme/stock-analyzer" className="underline hover:text-neutral">
-              Open Source
-            </a>
-          </p>
-        </footer>
+        <SettingsProvider
+          initialLocale={locale}
+          initialTheme={theme}
+          initialAiProvider={aiProvider}
+          initialMarket={market}
+          initialAvailableAiProviders={availableAiProviders}
+        >
+          <Navbar marketTagline={marketTagline} />
+          <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+            {children}
+          </main>
+          <footer className="mt-12 border-t border-surface-border py-6 text-center text-xs text-neutral/60">
+            <p>
+              {dict.layout.footerLead}{" "}
+              <a href="https://github.com/hamperme/stock-analyzer" className="underline hover:text-neutral">
+                {dict.layout.openSource}
+              </a>
+            </p>
+          </footer>
+        </SettingsProvider>
       </body>
     </html>
   );

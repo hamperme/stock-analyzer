@@ -13,6 +13,8 @@ import { GoogleGenAI } from "@google/genai";
 import { getGeminiStatus } from "@/lib/gemini";
 import { loadAnalysis } from "@/lib/store";
 
+export const dynamic = "force-dynamic";
+
 export async function GET() {
   const status = getGeminiStatus();
 

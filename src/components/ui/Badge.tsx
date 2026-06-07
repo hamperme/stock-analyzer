@@ -49,7 +49,7 @@ export function Badge({ children, variant = "neutral", size = "sm", className }:
   );
 }
 
-export function SetupBadge({ label }: { label: string }) {
+export function SetupBadge({ label, displayLabel }: { label: string; displayLabel?: string }) {
   const variant =
     label === "Strong Setup"
       ? "strong"
@@ -58,18 +58,18 @@ export function SetupBadge({ label }: { label: string }) {
       : label === "Avoid"
       ? "avoid"
       : "neutral";
-  return <Badge variant={variant}>{label}</Badge>;
+  return <Badge variant={variant}>{displayLabel ?? label}</Badge>;
 }
 
-export function NewsSentimentBadge({ sentiment }: { sentiment: string }) {
+export function NewsSentimentBadge({ sentiment, displayLabel }: { sentiment: string; displayLabel?: string }) {
   const variant =
     sentiment === "positive" ? "bull" : sentiment === "negative" ? "bear" : "neutral";
   const label =
     sentiment === "positive" ? "Positive" : sentiment === "negative" ? "Negative" : "Neutral";
-  return <Badge variant={variant}>{label}</Badge>;
+  return <Badge variant={variant}>{displayLabel ?? label}</Badge>;
 }
 
-export function RecommendationBadge({ rec }: { rec: string }) {
+export function RecommendationBadge({ rec, displayLabel }: { rec: string; displayLabel?: string }) {
   const variant =
     rec === "Strong Buy"
       ? "strong"
@@ -82,7 +82,7 @@ export function RecommendationBadge({ rec }: { rec: string }) {
       : "avoid";
   return (
     <Badge variant={variant} size="md">
-      {rec}
+      {displayLabel ?? rec}
     </Badge>
   );
 }

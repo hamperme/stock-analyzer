@@ -3,6 +3,8 @@ import { resetCircuitBreakers, getCircuitBreakerStatus } from "@/lib/yahoo-finan
 import { getFinnhubStatus } from "@/lib/finnhub";
 import { getStoreStatus } from "@/lib/store";
 
+export const dynamic = "force-dynamic";
+
 export async function GET() {
   const storeStatus = getStoreStatus();
   return NextResponse.json({

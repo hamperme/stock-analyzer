@@ -12,6 +12,8 @@ import { NextResponse } from "next/server";
 import { runFullRefresh, runQuoteRefresh } from "@/lib/refresh";
 import { loadMeta } from "@/lib/store";
 
+export const dynamic = "force-dynamic";
+
 // Prevent concurrent refreshes
 let refreshInProgress = false;
 

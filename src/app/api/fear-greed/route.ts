@@ -1,7 +1,19 @@
 import { NextResponse } from "next/server";
 import https from "https";
 import { cache, TTL } from "@/lib/cache";
+import { loadFearGreed, saveFearGreed } from "@/lib/store";
 import type { FearGreedData, FearGreedLabel } from "@/lib/types";
+
+export const dynamic = "force-dynamic";
+
+interface CNNFearGreedResponse {
+  fear_and_greed?: {
+    score?: number;
+    rating?: string;
+    previous_close?: number;
+    previous_1_week?: number;
+  };
+}
 
 function normalizeLabel(rating: string): FearGreedLabel {
   const r = rating.toLowerCase();
@@ -38,13 +50,24 @@ function httpsGetCNN(url: string): Promise<unknown> {
 export async function GET() {
   const cacheKey = "fear-greed";
   const cached = cache.get<FearGreedData>(cacheKey);
-  if (cached) return NextResponse.json({ data: cached, error: null });
+  if (cached) return NextResponse.json({ data: cached, error: null, source: "cache" });
+
+  const stored = loadFearGreed();
+  if (stored) {
+    cache.set(cacheKey, stored.data, TTL.FEAR_GREED);
+    return NextResponse.json({
+      data: stored.data,
+      error: null,
+      cachedAt: stored.updatedAt,
+      stale: stored.stale,
+      source: "store",
+    });
+  }
 
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const json = (await httpsGetCNN(
       "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
-    )) as any;
+    )) as CNNFearGreedResponse;
 
     const fg = json?.fear_and_greed;
     if (!fg?.score) throw new Error("Unexpected CNN response shape");
@@ -59,7 +82,8 @@ export async function GET() {
     };
 
     cache.set(cacheKey, data, TTL.FEAR_GREED);
-    return NextResponse.json({ data, error: null });
+    saveFearGreed(data);
+    return NextResponse.json({ data, error: null, source: "live" });
   } catch (err) {
     console.error("[fear-greed]", err);
     return NextResponse.json(

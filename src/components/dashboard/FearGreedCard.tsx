@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useSettings } from "@/components/app/SettingsProvider";
 import { Card, CardHeader, CardTitle } from "@/components/ui/Card";
 import { SkeletonCard } from "@/components/ui/LoadingSpinner";
 import type { FearGreedData, FearGreedLabel } from "@/lib/types";
@@ -71,12 +72,24 @@ function GaugeMeter({ score }: { score: number }) {
   );
 }
 
-export function FearGreedCard() {
-  const [data, setData] = useState<FearGreedData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+interface FearGreedCardProps {
+  initialData?: FearGreedData | null;
+  initialError?: string | null;
+}
+
+export function FearGreedCard({
+  initialData,
+  initialError,
+}: FearGreedCardProps) {
+  const { dict } = useSettings();
+  const hasInitialState = initialData !== undefined || initialError !== undefined;
+  const [data, setData] = useState<FearGreedData | null>(initialData ?? null);
+  const [loading, setLoading] = useState(!hasInitialState);
+  const [error, setError] = useState<string | null>(initialError ?? null);
 
   useEffect(() => {
+    if (hasInitialState) return;
+
     fetch("/api/fear-greed")
       .then((r) => r.json())
       .then((json) => {
@@ -85,7 +98,7 @@ export function FearGreedCard() {
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
-  }, []);
+  }, [hasInitialState]);
 
   if (loading) return <SkeletonCard className="h-full" />;
 
@@ -93,20 +106,21 @@ export function FearGreedCard() {
     return (
       <Card>
         <CardHeader>
-          <CardTitle>Fear &amp; Greed</CardTitle>
+          <CardTitle>{dict.fearGreed.shortTitle}</CardTitle>
         </CardHeader>
-        <p className="text-sm text-bear">{error ?? "No data"}</p>
+        <p className="text-sm text-bear">{error ?? dict.fearGreed.noData}</p>
       </Card>
     );
   }
 
   const cfg = labelConfig[data.label];
+  const translatedLabel = dict.fearGreed.labels[data.label];
 
   return (
     <Card className="flex flex-col">
       <CardHeader>
-        <CardTitle>Fear &amp; Greed Index</CardTitle>
-        <span className="text-xs text-neutral">via CNN Business</span>
+        <CardTitle>{dict.fearGreed.title}</CardTitle>
+        <span className="text-xs text-neutral">{dict.fearGreed.via}</span>
       </CardHeader>
 
       <div className="flex flex-1 flex-col items-center justify-center gap-1">
@@ -114,12 +128,12 @@ export function FearGreedCard() {
 
         <div className="text-center">
           <p className={`text-4xl font-black ${cfg.color}`}>{data.score}</p>
-          <p className={`mt-0.5 text-base font-semibold ${cfg.color}`}>{data.label}</p>
+          <p className={`mt-0.5 text-base font-semibold ${cfg.color}`}>{translatedLabel}</p>
         </div>
 
         <div className="mt-3 grid w-full grid-cols-2 gap-2 text-xs">
           <div className="rounded-lg bg-surface-elevated p-2 text-center">
-            <p className="text-neutral">Prev Close</p>
+            <p className="text-neutral">{dict.fearGreed.prevClose}</p>
             <p className={`font-bold ${data.vixChange >= 0 ? "text-bull" : "text-bear"}`}>
               {data.vix.toFixed(1)}
               <span className="ml-1 font-normal text-neutral">
@@ -128,7 +142,7 @@ export function FearGreedCard() {
             </p>
           </div>
           <div className="rounded-lg bg-surface-elevated p-2 text-center">
-            <p className="text-neutral">vs Last Week</p>
+            <p className="text-neutral">{dict.fearGreed.versusWeek}</p>
             <p className={`font-bold ${data.spMomentum >= 0 ? "text-bull" : "text-bear"}`}>
               {data.spMomentum > 0 ? "+" : ""}{data.spMomentum.toFixed(1)}
             </p>

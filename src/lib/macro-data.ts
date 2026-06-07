@@ -18,6 +18,7 @@
  */
 
 import https from "https";
+import { getAssetType, isCryptoSymbol, normalizeWatchlistEntry } from "./assets";
 import { cache, TTL } from "./cache";
 import { loadIndices, loadWatchlist, loadNews, loadMacroSnapshot, saveMacroSnapshot } from "./store";
 import { getWatchlistSymbols } from "./refresh";
@@ -49,16 +50,6 @@ const MACRO_INSTRUMENTS: MacroInstrument[] = [
   { symbol: "^VIX",     name: "VIX",              snapshotKey: "vix" },
   { symbol: "DX-Y.NYB", name: "US Dollar (DXY)",  snapshotKey: "dxy" },
   { symbol: "CL=F",     name: "WTI Crude",        snapshotKey: "oil" },
-];
-
-/**
- * Additional symbols fetched for breadth divergence only.
- * Not stored as top-level snapshot fields — used to compute
- * equal-weight vs cap-weight divergence (RSP − SPY).
- */
-const BREADTH_SYMBOLS = [
-  { symbol: "SPY", name: "S&P 500 ETF" },
-  { symbol: "RSP", name: "S&P 500 Equal Weight" },
 ];
 
 // ─── HTTP helper ─────────────────────────────────────────────────────────────
@@ -452,7 +443,7 @@ function buildSignals(
 // ─── Gather news headlines ───────────────────────────────────────────────────
 
 function gatherHeadlines(): string[] {
-  const symbols = getWatchlistSymbols();
+  const symbols = getWatchlistSymbols().filter((sym) => !isCryptoSymbol(sym));
   const headlines: string[] = [];
   for (const sym of symbols.slice(0, 5)) {
     const newsResult = loadNews(sym);
@@ -511,8 +502,9 @@ export async function buildMacroSnapshot(): Promise<MacroSnapshot> {
     : null;
 
   const wl = loadWatchlist();
-  const wlData = wl?.data ?? [];
-  const topMovers = wlData
+  const wlData = (wl?.data ?? []).map(normalizeWatchlistEntry);
+  const equityWatchlist = wlData.filter((entry) => (entry.assetType ?? getAssetType(entry.symbol)) === "stock");
+  const topMovers = equityWatchlist
     .map((w) => ({ symbol: w.symbol, changePercent: w.changePercent }))
     .sort((a, b) => Math.abs(b.changePercent) - Math.abs(a.changePercent))
     .slice(0, 8);
@@ -529,13 +521,13 @@ export async function buildMacroSnapshot(): Promise<MacroSnapshot> {
 
   // Watchlist A/D for breadth
   let wlBreadthData: { advancers: number; decliners: number; total: number } | null = null;
-  if (wlData.length > 0) {
+  if (equityWatchlist.length > 0) {
     let adv = 0, dec = 0;
-    for (const e of wlData) {
+    for (const e of equityWatchlist) {
       if (e.changePercent > 0) adv++;
       else if (e.changePercent < 0) dec++;
     }
-    wlBreadthData = { advancers: adv, decliners: dec, total: wlData.length };
+    wlBreadthData = { advancers: adv, decliners: dec, total: equityWatchlist.length };
   }
   const breadth = computeBreadth(wlBreadthData, spyPct, rspPct);
 

@@ -11,19 +11,19 @@ const config: Config = {
     extend: {
       colors: {
         surface: {
-          DEFAULT: "#111118",
-          hover: "#1a1a28",
-          elevated: "#1e1e2e",
-          border: "#252538",
+          DEFAULT: "rgb(var(--color-surface) / <alpha-value>)",
+          hover: "rgb(var(--color-surface-hover) / <alpha-value>)",
+          elevated: "rgb(var(--color-surface-elevated) / <alpha-value>)",
+          border: "rgb(var(--color-surface-border) / <alpha-value>)",
         },
         app: {
-          bg: "#0a0a0f",
+          bg: "rgb(var(--color-app-bg) / <alpha-value>)",
         },
-        bull: "#10b981",
-        bear: "#ef4444",
-        neutral: "#94a3b8",
-        accent: "#3b82f6",
-        warn: "#f59e0b",
+        bull: "rgb(var(--color-bull) / <alpha-value>)",
+        bear: "rgb(var(--color-bear) / <alpha-value>)",
+        neutral: "rgb(var(--color-neutral) / <alpha-value>)",
+        accent: "rgb(var(--color-accent) / <alpha-value>)",
+        warn: "rgb(var(--color-warn) / <alpha-value>)",
       },
       fontFamily: {
         mono: ["JetBrains Mono", "Fira Code", "Consolas", "monospace"],

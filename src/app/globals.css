@@ -5,6 +5,40 @@
 @layer base {
   :root {
     color-scheme: dark;
+    --color-app-bg: 10 10 15;
+    --color-surface: 17 17 24;
+    --color-surface-hover: 26 26 40;
+    --color-surface-elevated: 30 30 46;
+    --color-surface-border: 37 37 56;
+    --color-neutral: 148 163 184;
+    --color-accent: 59 130 246;
+    --color-bull: 16 185 129;
+    --color-bear: 239 68 68;
+    --color-warn: 245 158 11;
+    --color-foreground: 226 232 240;
+    --color-foreground-strong: 241 245 249;
+    --color-foreground-soft: 203 213 225;
+    --color-foreground-muted: 148 163 184;
+    --color-foreground-subtle: 100 116 139;
+  }
+
+  html.light {
+    color-scheme: light;
+    --color-app-bg: 244 247 251;
+    --color-surface: 255 255 255;
+    --color-surface-hover: 239 244 251;
+    --color-surface-elevated: 241 245 249;
+    --color-surface-border: 214 223 236;
+    --color-neutral: 71 85 105;
+    --color-accent: 37 99 235;
+    --color-bull: 5 150 105;
+    --color-bear: 220 38 38;
+    --color-warn: 217 119 6;
+    --color-foreground: 30 41 59;
+    --color-foreground-strong: 15 23 42;
+    --color-foreground-soft: 30 41 59;
+    --color-foreground-muted: 71 85 105;
+    --color-foreground-subtle: 100 116 139;
   }
 
   * {
@@ -16,7 +50,9 @@
   }
 
   body {
-    @apply bg-app-bg text-slate-200 antialiased;
+    @apply antialiased;
+    background-color: rgb(var(--color-app-bg));
+    color: rgb(var(--color-foreground));
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
   }
 
@@ -25,13 +61,48 @@
     height: 6px;
   }
   ::-webkit-scrollbar-track {
-    @apply bg-app-bg;
+    background-color: rgb(var(--color-app-bg));
   }
   ::-webkit-scrollbar-thumb {
-    @apply rounded-full bg-surface-elevated;
+    @apply rounded-full;
+    background-color: rgb(var(--color-surface-elevated));
   }
   ::-webkit-scrollbar-thumb:hover {
-    @apply bg-neutral/30;
+    background-color: rgb(var(--color-neutral) / 0.3);
+  }
+
+  html.light .text-slate-100,
+  html.light .text-slate-200 {
+    color: rgb(var(--color-foreground-strong));
+  }
+
+  html.light .text-slate-300 {
+    color: rgb(var(--color-foreground-soft));
+  }
+
+  html.light .text-slate-400,
+  html.light .text-slate-500 {
+    color: rgb(var(--color-foreground-muted));
+  }
+
+  html.light .text-slate-600 {
+    color: rgb(var(--color-foreground-subtle));
+  }
+
+  html.light .text-sky-300 {
+    color: rgb(29 78 216);
+  }
+
+  html.light .text-amber-300 {
+    color: rgb(161 98 7);
+  }
+
+  html.light .hover\:text-slate-200:hover {
+    color: rgb(var(--color-foreground-strong));
+  }
+
+  html.light .hover\:border-slate-500:hover {
+    border-color: rgb(148 163 184);
   }
 }
 

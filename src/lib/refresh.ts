@@ -23,13 +23,16 @@ import { getHistoricalData as getTwelveHistory } from "./twelvedata";
 import { calculateRSI, calculateRelativeVolume, calculateSetupScore, lastSMA } from "./calculations";
 import { cache, TTL } from "./cache";
 import * as store from "./store";
+import { isCryptoSymbol, normalizeQuote, normalizeWatchlistEntry } from "./assets";
 import type { HistoricalBar, WatchlistEntry } from "./types";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-const DEFAULT_SYMBOLS = "AAPL,MSFT,GOOGL,NVDA,AMZN,META,TSLA,JPM,V,UNH";
+const DEFAULT_SYMBOLS = "AAPL,MSFT,GOOGL,NVDA,AMZN,META,BTC-USD,ETH-USD,SOL-USD";
 
 export function getWatchlistSymbols(): string[] {
+  const stored = store.loadWatchlistSymbols();
+  if (stored !== null) return stored;
   const raw = process.env.WATCHLIST_SYMBOLS ?? DEFAULT_SYMBOLS;
   return raw.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
 }
@@ -77,16 +80,19 @@ async function fetchHistoryFromProviders(
   days = 1825
 ): Promise<{ bars: HistoricalBar[]; source: string | null }> {
   const errors: string[] = [];
+  const crypto = isCryptoSymbol(symbol);
 
-  // 1. Finnhub candles (primary — try first, even if it may 403)
-  try {
-    const bars = await getFinnhubHistory(symbol, days);
-    if (bars.length > 0) {
-      cache.set(`shared:history:${symbol}:1825`, bars, TTL.HISTORY);
-      return { bars, source: "finnhub" };
+  if (!crypto) {
+    // 1. Finnhub candles (primary — try first, even if it may 403)
+    try {
+      const bars = await getFinnhubHistory(symbol, days);
+      if (bars.length > 0) {
+        cache.set(`shared:history:${symbol}:1825`, bars, TTL.HISTORY);
+        return { bars, source: "finnhub" };
+      }
+    } catch (e) {
+      errors.push(`finnhub: ${(e as Error).message}`);
     }
-  } catch (e) {
-    errors.push(`finnhub: ${(e as Error).message}`);
   }
 
   // 2. Ensure Yahoo circuit breakers are clear before attempting Yahoo
@@ -144,7 +150,7 @@ function buildWatchlistEntry(symbol: string): WatchlistEntry | null {
   const h = store.loadHistory(symbol);
   if (!q) return null;
 
-  const quote = q.data;
+  const quote = normalizeQuote(q.data);
   const bars = h?.data ?? [];
   const closes = bars.map((b) => b.close);
   const volumes = bars.map((b) => b.volume);
@@ -176,8 +182,9 @@ function buildWatchlistEntry(symbol: string): WatchlistEntry | null {
     setupScore >= 60 ? "Watch" :
     setupScore >= 40 ? "Neutral" : "Avoid";
 
-  return {
+  return normalizeWatchlistEntry({
     symbol,
+    assetType: quote.assetType,
     shortName: quote.shortName,
     price: quote.price,
     change: quote.change,
@@ -190,7 +197,82 @@ function buildWatchlistEntry(symbol: string): WatchlistEntry | null {
     rsi,
     setupScore,
     setupLabel,
+  });
+}
+
+function invalidateWatchlistCaches(): void {
+  cache.delete("macro:snapshot");
+  cache.delete("macro:view");
+}
+
+export async function refreshSymbolData(
+  symbol: string,
+  options: { skipHistory?: boolean; skipNews?: boolean } = {}
+): Promise<RefreshResult["results"][string]> {
+  const result: RefreshResult["results"][string] = {
+    quote: false,
+    history: false,
+    historySource: null,
+    news: false,
+    errors: [],
   };
+
+  try {
+    const quote = normalizeQuote(await getFinnhubQuote(symbol));
+    store.saveQuote(symbol, quote);
+    result.quote = true;
+  } catch (e) {
+    result.errors.push(`quote: ${(e as Error).message}`);
+    return result;
+  }
+
+  if (!options.skipHistory) {
+    try {
+      const { bars, source } = await fetchHistoryFromProviders(symbol, 1825);
+      if (bars.length > 0) {
+        store.saveHistory(symbol, bars);
+        result.history = true;
+        result.historySource = source;
+      } else {
+        result.errors.push("history: all providers returned empty");
+      }
+    } catch (e) {
+      result.errors.push(`history: ${(e as Error).message}`);
+    }
+  } else {
+    result.history = true;
+  }
+
+  if (!options.skipNews) {
+    try {
+      const news = await getFinnhubNews(symbol);
+      store.saveNews(symbol, news);
+      result.news = true;
+    } catch (e) {
+      result.errors.push(`news: ${(e as Error).message}`);
+    }
+  } else {
+    result.news = true;
+  }
+
+  return result;
+}
+
+export function rebuildWatchlistSnapshot(symbols = getWatchlistSymbols()): WatchlistEntry[] {
+  const entries: WatchlistEntry[] = [];
+  for (const symbol of symbols) {
+    const entry = buildWatchlistEntry(symbol);
+    if (entry) entries.push(entry);
+  }
+
+  store.saveWatchlist(entries);
+  invalidateWatchlistCaches();
+
+  const meta = store.loadMeta();
+  meta.lastWatchlistRefresh = new Date().toISOString();
+  store.saveMeta(meta);
+
+  return entries;
 }
 
 /**
@@ -220,7 +302,7 @@ export async function runFullRefresh(
   console.log("[refresh] Phase 1: Fetching quotes for", symbols.length, "symbols");
   for (const symbol of symbols) {
     try {
-      const quote = await getFinnhubQuote(symbol);
+      const quote = normalizeQuote(await getFinnhubQuote(symbol));
       store.saveQuote(symbol, quote);
       results[symbol].quote = true;
     } catch (e) {
@@ -287,15 +369,8 @@ export async function runFullRefresh(
   // ── Phase 4: Build watchlist snapshot from stored data ─────────────────────
   let watchlistBuilt = false;
   try {
-    const entries: WatchlistEntry[] = [];
-    for (const symbol of symbols) {
-      const wEntry = buildWatchlistEntry(symbol);
-      if (wEntry) entries.push(wEntry);
-    }
-    if (entries.length > 0) {
-      store.saveWatchlist(entries);
-      watchlistBuilt = true;
-    }
+    rebuildWatchlistSnapshot();
+    watchlistBuilt = true;
   } catch (e) {
     meta.errors.push({ time: new Date().toISOString(), message: `watchlist build: ${(e as Error).message}` });
     totalErrors++;
@@ -337,7 +412,7 @@ export async function runQuoteRefresh(symbols?: string[]): Promise<{ updated: st
 
   for (const symbol of syms) {
     try {
-      const quote = await getFinnhubQuote(symbol);
+      const quote = normalizeQuote(await getFinnhubQuote(symbol));
       store.saveQuote(symbol, quote);
       updated.push(symbol);
     } catch (e) {
@@ -348,13 +423,7 @@ export async function runQuoteRefresh(symbols?: string[]): Promise<{ updated: st
 
   // Rebuild watchlist with new quotes
   try {
-    const allSyms = getWatchlistSymbols();
-    const entries: WatchlistEntry[] = [];
-    for (const sym of allSyms) {
-      const wEntry = buildWatchlistEntry(sym);
-      if (wEntry) entries.push(wEntry);
-    }
-    if (entries.length > 0) store.saveWatchlist(entries);
+    rebuildWatchlistSnapshot();
   } catch { /* best effort */ }
 
   const meta = store.loadMeta();

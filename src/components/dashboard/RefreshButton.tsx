@@ -2,6 +2,8 @@
 
 import { useState, useEffect } from "react";
 import { RefreshCw, CheckCircle, AlertCircle } from "lucide-react";
+import { useSettings } from "@/components/app/SettingsProvider";
+import { formatStableLocalDateTime } from "@/lib/time";
 
 interface RefreshMeta {
   lastFullRefresh: string | null;
@@ -9,10 +11,15 @@ interface RefreshMeta {
   refreshInProgress: boolean;
 }
 
-export function RefreshButton() {
+interface RefreshButtonProps {
+  initialMeta?: RefreshMeta | null;
+}
+
+export function RefreshButton({ initialMeta }: RefreshButtonProps) {
+  const { dict } = useSettings();
   const [refreshing, setRefreshing] = useState(false);
   const [status, setStatus] = useState<"idle" | "success" | "error">("idle");
-  const [meta, setMeta] = useState<RefreshMeta | null>(null);
+  const [meta, setMeta] = useState<RefreshMeta | null>(initialMeta ?? null);
   const [message, setMessage] = useState("");
 
   // Load refresh status on mount
@@ -28,7 +35,7 @@ export function RefreshButton() {
   const handleRefresh = async (type: "full" | "quotes") => {
     setRefreshing(true);
     setStatus("idle");
-    setMessage(type === "full" ? "Refreshing all data..." : "Updating quotes...");
+    setMessage(type === "full" ? dict.refreshButton.refreshingAll : dict.refreshButton.updatingQuotes);
 
     try {
       const res = await fetch(`/api/refresh?type=${type}`, { method: "POST" });
@@ -41,11 +48,14 @@ export function RefreshButton() {
         const result = json.data;
         if (type === "full") {
           setMessage(
-            `Refreshed ${result.symbols?.length ?? 0} symbols in ${Math.round((result.durationMs ?? 0) / 1000)}s` +
-            (result.totalErrors > 0 ? ` (${result.totalErrors} errors)` : "")
+            dict.refreshButton.refreshedSymbols(
+              result.symbols?.length ?? 0,
+              Math.round((result.durationMs ?? 0) / 1000),
+              result.totalErrors ?? 0
+            )
           );
         } else {
-          setMessage(`Updated ${result.updated?.length ?? 0} quotes`);
+          setMessage(dict.refreshButton.updatedQuotes(result.updated?.length ?? 0));
         }
         // Reload the page data after a short delay
         setTimeout(() => window.location.reload(), 1500);
@@ -59,8 +69,8 @@ export function RefreshButton() {
   };
 
   const lastRefresh = meta?.lastFullRefresh
-    ? new Date(meta.lastFullRefresh).toLocaleString()
-    : "Never";
+    ? formatStableLocalDateTime(meta.lastFullRefresh)
+    : dict.common.never;
 
   return (
     <div className="flex flex-col items-end gap-1.5">
@@ -71,7 +81,7 @@ export function RefreshButton() {
           className="flex items-center gap-1.5 rounded-lg border border-surface-border bg-surface px-3 py-1.5 text-xs font-medium text-neutral hover:bg-surface-elevated hover:text-slate-200 transition-colors disabled:opacity-50"
         >
           <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
-          Quick Update
+          {dict.refreshButton.quickUpdate}
         </button>
         <button
           onClick={() => handleRefresh("full")}
@@ -79,7 +89,7 @@ export function RefreshButton() {
           className="flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-white hover:bg-accent/90 transition-colors disabled:opacity-50"
         >
           <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
-          Full Refresh
+          {dict.refreshButton.fullRefresh}
         </button>
       </div>
 
@@ -99,7 +109,7 @@ export function RefreshButton() {
 
       {/* Last refresh time */}
       <p className="text-[10px] text-neutral/50">
-        Last full refresh: {lastRefresh}
+        {dict.refreshButton.lastFullRefresh(lastRefresh)}
       </p>
     </div>
   );

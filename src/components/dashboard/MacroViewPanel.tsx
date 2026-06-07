@@ -19,8 +19,10 @@ import {
   Circle,
   AlertCircle,
 } from "lucide-react";
+import { useSettings } from "@/components/app/SettingsProvider";
 import { Card } from "@/components/ui/Card";
 import { SkeletonCard } from "@/components/ui/LoadingSpinner";
+import { formatStableLocalTime } from "@/lib/time";
 import type { MacroView, MacroSnapshot, MacroDataPoint, MarketRegime, InputSignal, ConfidenceMeta } from "@/lib/types";
 
 const REFRESH_MS = 30 * 60_000; // 30 minutes
@@ -91,19 +93,30 @@ function SignalDot({ signal }: { signal: InputSignal }) {
 
 // ─── Confidence bar ─────────────────────────────────────────────────────────
 
-function ConfidenceBar({ confidence }: { confidence: ConfidenceMeta }) {
+function ConfidenceBar({
+  confidence,
+  labels,
+}: {
+  confidence: ConfidenceMeta;
+  labels: { high: string; medium: string; low: string };
+}) {
   const color = confidence.level === "High" ? "bg-emerald-400"
     : confidence.level === "Medium" ? "bg-amber-400"
     : "bg-slate-500";
   const textColor = confidence.level === "High" ? "text-emerald-400"
     : confidence.level === "Medium" ? "text-amber-400"
     : "text-slate-500";
+  const levelLabel = confidence.level === "High"
+    ? labels.high
+    : confidence.level === "Medium"
+    ? labels.medium
+    : labels.low;
 
   return (
     <div className="flex items-center gap-2">
       <div className="flex items-center gap-1.5">
         <span className={`text-[10px] font-semibold ${textColor}`}>
-          {confidence.level}
+          {levelLabel}
         </span>
         <div className="h-1.5 w-16 rounded-full bg-surface-elevated overflow-hidden">
           <div
@@ -121,16 +134,31 @@ function ConfidenceBar({ confidence }: { confidence: ConfidenceMeta }) {
 
 // ─── Main component ─────────────────────────────────────────────────────────
 
-export function MacroViewPanel() {
-  const [data, setData] = useState<MacroView | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+interface MacroViewPanelProps {
+  initialData?: MacroView | null;
+  initialError?: string | null;
+  initialLastUpdated?: string | null;
+}
+
+export function MacroViewPanel({
+  initialData,
+  initialError,
+  initialLastUpdated,
+}: MacroViewPanelProps) {
+  const { dict, aiProvider } = useSettings();
+  const [data, setData] = useState<MacroView | null>(initialData ?? null);
+  const [loading, setLoading] = useState(
+    initialData === undefined && initialError === undefined && initialLastUpdated === undefined
+  );
+  const [error, setError] = useState<string | null>(initialError ?? null);
   const [expanded, setExpanded] = useState(true);
-  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(
+    initialLastUpdated ? new Date(initialLastUpdated) : null
+  );
 
   const fetchData = useCallback(async () => {
     try {
-      const res = await fetch("/api/macro-view");
+      const res = await fetch(`/api/macro-view?provider=${aiProvider}`);
       const json = await res.json();
       if (json.error) throw new Error(json.error);
       setData(json.data);
@@ -141,7 +169,7 @@ export function MacroViewPanel() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [aiProvider]);
 
   useEffect(() => {
     fetchData();
@@ -158,10 +186,10 @@ export function MacroViewPanel() {
       <Card>
         <div className="flex items-center gap-2 mb-2">
           <Brain className="h-4 w-4 text-indigo-400" />
-          <h3 className="text-sm font-semibold uppercase tracking-wider text-neutral">Macro Regime</h3>
+          <h3 className="text-sm font-semibold uppercase tracking-wider text-neutral">{dict.macro.title}</h3>
         </div>
         <p className="text-sm text-neutral">
-          {error ?? "No macro data available. Run a Full Refresh to populate market data, then reload."}
+          {error ?? dict.macro.noData}
         </p>
       </Card>
     );
@@ -169,7 +197,8 @@ export function MacroViewPanel() {
 
   const regime = regimeConfig[data.regime] ?? regimeConfig["Mixed"];
   const RegimeIcon = regime.icon;
-  const isAI = data.source === "gemini";
+  const isAI = data.source !== "fallback";
+  const translatedRegime = dict.macro.regimes[data.regime] ?? data.regime;
   const snap: MacroSnapshot | null = data.snapshot ?? null;
   const conf: ConfidenceMeta = data.confidence && typeof data.confidence === "object"
     ? data.confidence
@@ -190,28 +219,28 @@ export function MacroViewPanel() {
         <div className="flex items-center gap-2 min-w-0">
           <Brain className="h-4 w-4 shrink-0 text-indigo-400" />
           <h3 className="text-sm font-semibold uppercase tracking-wider text-neutral">
-            Macro Regime
+            {dict.macro.title}
           </h3>
           {isAI ? (
             <span className="flex items-center gap-1 rounded-full bg-indigo-500/15 px-2 py-0.5 text-[10px] font-medium text-indigo-400 border border-indigo-500/30 shrink-0">
               <Sparkles className="h-3 w-3" />
-              AI-Synthesized
+              {dict.macro.aiSynthesized}
             </span>
           ) : (
             <span className="rounded-full bg-slate-500/15 px-2 py-0.5 text-[10px] font-medium text-slate-500 border border-slate-500/30 shrink-0">
-              Rule-Based
+              {dict.macro.ruleBased}
             </span>
           )}
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <span className={`flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold ${regime.color} ${regime.bg} border ${regime.border}`}>
             <RegimeIcon className="h-3.5 w-3.5" />
-            {data.regime}
+            {translatedRegime}
           </span>
           <button
             onClick={() => setExpanded(!expanded)}
             className="rounded-lg p-1 text-neutral transition-colors hover:bg-surface-elevated hover:text-slate-200"
-            aria-label={expanded ? "Collapse" : "Expand"}
+            aria-label={expanded ? dict.macro.collapse : dict.macro.expand}
           >
             {expanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
           </button>
@@ -302,7 +331,7 @@ export function MacroViewPanel() {
               <div className="mb-2 flex items-center gap-1.5">
                 <TrendingUp className="h-4 w-4 text-emerald-400" />
                 <span className="text-xs font-bold uppercase tracking-wider text-emerald-400">
-                  Bull Case
+                  {dict.macro.bullCase}
                 </span>
               </div>
               <ul className="space-y-1.5">
@@ -320,7 +349,7 @@ export function MacroViewPanel() {
               <div className="mb-2 flex items-center gap-1.5">
                 <TrendingDown className="h-4 w-4 text-red-400" />
                 <span className="text-xs font-bold uppercase tracking-wider text-red-400">
-                  Bear Case
+                  {dict.macro.bearCase}
                 </span>
               </div>
               <ul className="space-y-1.5">
@@ -339,7 +368,7 @@ export function MacroViewPanel() {
             <div className="mb-1.5 flex items-center gap-1.5">
               <Activity className="h-3.5 w-3.5 text-slate-400" />
               <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
-                Regime Assessment
+                {dict.macro.regimeAssessment}
               </span>
             </div>
             <p className="text-xs leading-relaxed text-slate-300">
@@ -353,7 +382,7 @@ export function MacroViewPanel() {
               <div className="mb-1.5 flex items-center gap-1.5">
                 <Eye className="h-3.5 w-3.5 text-amber-400" />
                 <span className="text-[10px] font-bold uppercase tracking-wider text-amber-500">
-                  Watch Next
+                  {dict.macro.watchNext}
                 </span>
               </div>
               <ul className="space-y-1">
@@ -373,7 +402,7 @@ export function MacroViewPanel() {
             {snap?.signals && snap.signals.length > 0 && (
               <div>
                 <span className="text-[10px] font-bold uppercase tracking-wider text-neutral/50 block mb-1.5">
-                  Inputs
+                  {dict.macro.inputs}
                 </span>
                 <div className="flex flex-wrap gap-x-3 gap-y-1">
                   {snap.signals.map((sig) => (
@@ -387,8 +416,15 @@ export function MacroViewPanel() {
             <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5 pt-1 border-t border-surface-border/50">
               <div className="flex items-center gap-4">
                 <div className="flex items-center gap-1.5">
-                  <span className="text-[10px] text-neutral/50">Confidence:</span>
-                  <ConfidenceBar confidence={conf} />
+                  <span className="text-[10px] text-neutral/50">{dict.macro.confidence}:</span>
+                  <ConfidenceBar
+                    confidence={conf}
+                    labels={{
+                      high: dict.common.high,
+                      medium: dict.common.medium,
+                      low: dict.common.low,
+                    }}
+                  />
                 </div>
                 {conf.reasons.length > 0 && (
                   <span className="text-[10px] text-neutral/40 hidden md:inline" title={conf.reasons.join(" | ")}>
@@ -400,13 +436,13 @@ export function MacroViewPanel() {
                 {conf.isStale && (
                   <span className="flex items-center gap-1 text-amber-500">
                     <Clock className="h-2.5 w-2.5" />
-                    Stale
+                    {dict.macro.stale}
                   </span>
                 )}
                 {lastUpdated && (
                   <span className="flex items-center gap-1">
                     <RefreshCw className="h-2.5 w-2.5" />
-                    {lastUpdated.toLocaleTimeString()}
+                    {dict.common.updatedAt(formatStableLocalTime(lastUpdated))}
                   </span>
                 )}
               </div>

@@ -17,6 +17,7 @@
 import https from "https";
 import { execSync } from "child_process";
 import { cache, TTL } from "./cache";
+import { getAssetType, getCryptoBaseSymbol, getDefaultAssetName, isCryptoSymbol } from "./assets";
 import type { StockQuote, HistoricalBar, NewsItem, NewsTag } from "./types";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -142,21 +143,42 @@ export async function getQuote(symbol: string): Promise<StockQuote> {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=5d`;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const raw = (await yfFetch(url)) as any;
+  let raw: any;
+  try {
+    raw = await yfFetch(url);
+  } catch (err) {
+    console.warn(`[yahoo/${symbol}] quote https failed (${(err as Error).message}), falling back to curl`);
+    try {
+      raw = curlGet(url);
+    } catch (curlErr) {
+      throw new Error(
+        `Yahoo quote failed for ${symbol}: https=${(err as Error).message}, curl=${(curlErr as Error).message}`
+      );
+    }
+  }
+
   const result = raw?.chart?.result?.[0];
   if (!result) throw new Error(`No data returned for ${symbol}`);
 
   const meta = result.meta ?? {};
-  const prevClose: number = meta.chartPreviousClose ?? meta.regularMarketPrice ?? 0;
   const price: number = meta.regularMarketPrice ?? 0;
+  const closes: Array<number | null> = result.indicators?.quote?.[0]?.close ?? [];
+  const previousSeriesClose = closes
+    .slice(0, -1)
+    .reverse()
+    .find((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0);
+  const prevClose: number = meta.chartPreviousClose ?? previousSeriesClose ?? meta.regularMarketPrice ?? 0;
   const change = Math.round((price - prevClose) * 100) / 100;
   const changePercent =
     prevClose > 0 ? Math.round((change / prevClose) * 10000) / 100 : 0;
+  const assetType = getAssetType(symbol);
+  const defaultName = getDefaultAssetName(symbol);
 
   const quote: StockQuote = {
     symbol: meta.symbol ?? symbol,
-    shortName: meta.shortName ?? symbol,
-    longName: meta.longName ?? meta.shortName ?? symbol,
+    assetType,
+    shortName: meta.shortName ?? meta.longName ?? defaultName,
+    longName: meta.longName ?? meta.shortName ?? defaultName,
     price,
     previousClose: prevClose,
     change,
@@ -325,7 +347,8 @@ export async function getNews(symbol: string): Promise<NewsItem[]> {
   if (cached) return cached;
 
   try {
-    const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(symbol)}&newsCount=20&enableFuzzyQuery=false&quotesCount=0`;
+    const query = isCryptoSymbol(symbol) ? getCryptoBaseSymbol(symbol) : symbol;
+    const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(query)}&newsCount=20&enableFuzzyQuery=false&quotesCount=0`;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const json = (await yfFetch(url)) as any;
     const rawNews: Array<{

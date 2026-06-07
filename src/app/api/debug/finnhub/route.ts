@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { getQuote, getHistoricalData, getFinnhubStatus } from "@/lib/finnhub";
 
+export const dynamic = "force-dynamic";
+
 export async function GET() {
   const status = getFinnhubStatus();
 

@@ -19,7 +19,18 @@
 import Database from "better-sqlite3";
 import path from "path";
 import fs from "fs";
-import type { StockQuote, HistoricalBar, WatchlistEntry, NewsItem, AIAnalysis, MarketIndex, MacroView, MacroSnapshot } from "./types";
+import type {
+  StockQuote,
+  HistoricalBar,
+  WatchlistEntry,
+  NewsItem,
+  AIAnalysis,
+  MarketIndex,
+  MacroView,
+  MacroSnapshot,
+  FearGreedData,
+} from "./types";
+import type { AppAiProvider, DashboardMarket } from "./app-settings";
 
 // ─── Staleness thresholds (ms) — data older than this is "stale" but still served
 export const STALE = {
@@ -29,6 +40,7 @@ export const STALE = {
   NEWS: 30 * 60_000,          // 30 minutes
   ANALYSIS: 2 * 60 * 60_000,  // 2 hours
   INDICES: 5 * 60_000,        // 5 minutes
+  FEAR_GREED: 30 * 60_000,    // 30 minutes
   MACRO_SNAPSHOT: 30 * 60_000,  // 30 minutes — raw macro data
   MACRO_VIEW: 4 * 60 * 60_000, // 4 hours — synthesized view
 };
@@ -37,6 +49,7 @@ export const STALE = {
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const DB_PATH = path.join(DATA_DIR, "stockpulse.db");
+const WATCHLIST_SYMBOLS_KEY = "watchlist_symbols";
 
 let _db: Database.Database | null = null;
 
@@ -80,6 +93,14 @@ function upsert(kind: string, key: string, data: unknown): void {
     VALUES (?, ?, ?, ?)
     ON CONFLICT(kind, key) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at
   `).run(kind, key, json, now);
+}
+
+function normalizeSymbols(symbols: string[]): string[] {
+  return Array.from(new Set(
+    symbols
+      .map((symbol) => symbol.trim().toUpperCase())
+      .filter(Boolean)
+  ));
 }
 
 interface LoadResult<T> {
@@ -130,6 +151,30 @@ export function loadWatchlist(): LoadResult<WatchlistEntry[]> | null {
   return load<WatchlistEntry[]>("watchlist", "_global", STALE.WATCHLIST);
 }
 
+export function loadWatchlistSymbols(): string[] | null {
+  const db = getDb();
+  const row = db.prepare(`SELECT value FROM meta WHERE key = ?`).get(WATCHLIST_SYMBOLS_KEY) as
+    | { value: string }
+    | undefined;
+  if (!row) return null;
+  try {
+    const parsed = JSON.parse(row.value);
+    return Array.isArray(parsed) ? normalizeSymbols(parsed) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveWatchlistSymbols(symbols: string[]): string[] {
+  const normalized = normalizeSymbols(symbols);
+  const db = getDb();
+  db.prepare(`
+    INSERT INTO meta (key, value) VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `).run(WATCHLIST_SYMBOLS_KEY, JSON.stringify(normalized));
+  return normalized;
+}
+
 // ─── News ────────────────────────────────────────────────────────────────────
 
 export function saveNews(symbol: string, news: NewsItem[]): void {
@@ -142,22 +187,61 @@ export function loadNews(symbol: string): LoadResult<NewsItem[]> | null {
 
 // ─── Analysis ────────────────────────────────────────────────────────────────
 
-export function saveAnalysis(symbol: string, analysis: AIAnalysis): void {
-  upsert("analysis", symbol, analysis);
+function analysisKey(
+  symbol: string,
+  locale: "en" | "zh",
+  provider: AppAiProvider
+): string {
+  return `${symbol}:${locale}:${provider}`;
 }
 
-export function loadAnalysis(symbol: string): LoadResult<AIAnalysis> | null {
-  return load<AIAnalysis>("analysis", symbol, STALE.ANALYSIS);
+export function saveAnalysis(
+  symbol: string,
+  analysis: AIAnalysis,
+  locale: "en" | "zh" = "en",
+  provider: AppAiProvider = "gemini"
+): void {
+  upsert("analysis", analysisKey(symbol, locale, provider), analysis);
+}
+
+export function loadAnalysis(
+  symbol: string,
+  locale: "en" | "zh" = "en",
+  provider: AppAiProvider = "gemini"
+): LoadResult<AIAnalysis> | null {
+  return (
+    load<AIAnalysis>("analysis", analysisKey(symbol, locale, provider), STALE.ANALYSIS) ??
+    (provider === "gemini" && locale === "en"
+      ? load<AIAnalysis>("analysis", symbol, STALE.ANALYSIS)
+      : null)
+  );
 }
 
 // ─── Indices ─────────────────────────────────────────────────────────────────
 
-export function saveIndices(indices: MarketIndex[]): void {
-  upsert("indices", "_global", indices);
+function indicesKey(market: DashboardMarket): string {
+  return `_global:${market}`;
 }
 
-export function loadIndices(): LoadResult<MarketIndex[]> | null {
-  return load<MarketIndex[]>("indices", "_global", STALE.INDICES);
+export function saveIndices(indices: MarketIndex[], market: DashboardMarket = "us"): void {
+  upsert("indices", indicesKey(market), indices);
+}
+
+export function loadIndices(market: DashboardMarket = "us"): LoadResult<MarketIndex[]> | null {
+  return (
+    load<MarketIndex[]>("indices", indicesKey(market), STALE.INDICES) ??
+    (market === "us" ? load<MarketIndex[]>("indices", "_global", STALE.INDICES) : null)
+  );
+}
+
+// ─── Fear & Greed ────────────────────────────────────────────────────────────
+
+export function saveFearGreed(data: FearGreedData): void {
+  upsert("fear_greed", "_global", data);
+}
+
+export function loadFearGreed(): LoadResult<FearGreedData> | null {
+  return load<FearGreedData>("fear_greed", "_global", STALE.FEAR_GREED);
 }
 
 // ─── Macro Snapshot ─────────────────────────────────────────────────────────
@@ -172,12 +256,22 @@ export function loadMacroSnapshot(): LoadResult<MacroSnapshot> | null {
 
 // ─── Macro View ─────────────────────────────────────────────────────────────
 
-export function saveMacroView(view: MacroView): void {
-  upsert("macro_view", "_global", view);
+function macroViewKey(provider: AppAiProvider): string {
+  return `_global:${provider}`;
 }
 
-export function loadMacroView(): LoadResult<MacroView> | null {
-  return load<MacroView>("macro_view", "_global", STALE.MACRO_VIEW);
+export function saveMacroView(
+  view: MacroView,
+  provider: AppAiProvider = "gemini"
+): void {
+  upsert("macro_view", macroViewKey(provider), view);
+}
+
+export function loadMacroView(provider: AppAiProvider = "gemini"): LoadResult<MacroView> | null {
+  return (
+    load<MacroView>("macro_view", macroViewKey(provider), STALE.MACRO_VIEW) ??
+    (provider === "gemini" ? load<MacroView>("macro_view", "_global", STALE.MACRO_VIEW) : null)
+  );
 }
 
 // ─── Meta / refresh log ──────────────────────────────────────────────────────

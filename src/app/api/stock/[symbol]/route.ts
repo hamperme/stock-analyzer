@@ -8,6 +8,7 @@
  */
 
 import { NextResponse } from "next/server";
+import { normalizeQuote } from "@/lib/assets";
 import { getQuote } from "@/lib/finnhub";
 import { computeIndicators } from "@/lib/calculations";
 import { loadQuote, loadHistory, saveQuote } from "@/lib/store";
@@ -31,14 +32,15 @@ export async function GET(_req: Request, { params }: { params: { symbol: string 
   const storedHistory = loadHistory(symbol);
 
   if (storedQuote) {
+    const quote = normalizeQuote(storedQuote.data);
     const bars = storedHistory?.data ?? [];
     const hasHistory = bars.length >= 15;
     const indicators = hasHistory
-      ? computeIndicators(bars, storedQuote.data.volume || undefined)
-      : fallbackIndicators(storedQuote.data.price);
+      ? computeIndicators(bars, quote.volume || undefined)
+      : fallbackIndicators(quote.price);
 
     return NextResponse.json({
-      data: { quote: storedQuote.data, indicators, hasHistory },
+      data: { quote, indicators, hasHistory },
       error: null,
       cachedAt: storedQuote.updatedAt,
       stale: storedQuote.stale,
@@ -49,7 +51,7 @@ export async function GET(_req: Request, { params }: { params: { symbol: string 
   // 2. Symbol not in store — do a lightweight one-time quote fetch to seed it.
   //    This is the ONLY live call a page route ever makes, and only for unknown symbols.
   try {
-    const quote = await getQuote(symbol);
+    const quote = normalizeQuote(await getQuote(symbol));
     saveQuote(symbol, quote);
 
     const bars = storedHistory?.data ?? [];

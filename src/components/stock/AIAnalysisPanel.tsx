@@ -2,10 +2,12 @@
 
 import { useEffect, useState } from "react";
 import { TrendingUp, TrendingDown, AlertTriangle, Sparkles, RefreshCw } from "lucide-react";
+import { useSettings } from "@/components/app/SettingsProvider";
 import { Card, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Badge, RecommendationBadge } from "@/components/ui/Badge";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
 import { formatDistanceToNow, parseISO } from "date-fns";
+import { zhCN } from "date-fns/locale";
 import type { AIAnalysis } from "@/lib/types";
 
 interface Props {
@@ -42,6 +44,7 @@ function AnalysisSection({
 }
 
 export function AIAnalysisPanel({ symbol }: Props) {
+  const { dict, locale, aiProvider } = useSettings();
   const [analysis, setAnalysis] = useState<AIAnalysis | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -49,11 +52,11 @@ export function AIAnalysisPanel({ symbol }: Props) {
   const fetchAnalysis = () => {
     setLoading(true);
     setError(null);
-    fetch(`/api/stock/${symbol}/analysis`)
+    fetch(`/api/stock/${symbol}/analysis?locale=${locale}&provider=${aiProvider}`)
       .then((r) => r.json())
       .then((json) => {
-        if (json.error) throw new Error(json.error);
-        setAnalysis(json.data);
+        setAnalysis(json.data ?? null);
+        setError(json.error ?? null);
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
@@ -62,14 +65,14 @@ export function AIAnalysisPanel({ symbol }: Props) {
   useEffect(() => {
     fetchAnalysis();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [symbol]);
+  }, [symbol, locale, aiProvider]);
 
   return (
     <Card>
       <CardHeader>
         <div className="flex items-center gap-2">
           <Sparkles className="h-4 w-4 text-accent" />
-          <CardTitle>AI Analysis</CardTitle>
+          <CardTitle>{dict.ai.title}</CardTitle>
         </div>
         <button
           onClick={fetchAnalysis}
@@ -77,15 +80,15 @@ export function AIAnalysisPanel({ symbol }: Props) {
           className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-neutral hover:bg-surface-elevated hover:text-slate-200 transition-colors disabled:opacity-50"
         >
           <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
-          Refresh
+          {dict.ai.refresh}
         </button>
       </CardHeader>
 
       {loading && (
         <div className="flex flex-col items-center justify-center gap-2 py-10">
           <LoadingSpinner size="lg" />
-          <p className="text-sm text-neutral">Generating AI analysis…</p>
-          <p className="text-xs text-neutral/60">This may take a few seconds</p>
+          <p className="text-sm text-neutral">{dict.ai.generating}</p>
+          <p className="text-xs text-neutral/60">{dict.ai.wait}</p>
         </div>
       )}
 
@@ -100,17 +103,23 @@ export function AIAnalysisPanel({ symbol }: Props) {
           {/* Recommendation banner */}
           <div className="flex items-center justify-between rounded-lg border border-surface-border bg-surface-elevated p-3">
             <div>
-              <p className="text-xs font-medium text-neutral">Recommendation</p>
+              <p className="text-xs font-medium text-neutral">{dict.ai.recommendation}</p>
               <div className="mt-1 flex items-center gap-2">
-                <RecommendationBadge rec={analysis.recommendation} />
+                <RecommendationBadge
+                  rec={analysis.recommendation}
+                  displayLabel={dict.ai.recommendations[analysis.recommendation]}
+                />
                 <Badge variant="neutral" size="sm">
-                  Confidence: {analysis.confidence}
+                  {dict.ai.confidence}: {dict.common[analysis.confidence.toLowerCase() as "high" | "medium" | "low"]}
                 </Badge>
               </div>
             </div>
             {analysis.generatedAt && (
               <p className="text-xs text-neutral/60">
-                {formatDistanceToNow(parseISO(analysis.generatedAt), { addSuffix: true })}
+                {formatDistanceToNow(parseISO(analysis.generatedAt), {
+                  addSuffix: true,
+                  locale: locale === "zh" ? zhCN : undefined,
+                })}
               </p>
             )}
           </div>
@@ -123,13 +132,13 @@ export function AIAnalysisPanel({ symbol }: Props) {
             <div className="grid grid-cols-2 gap-2">
               {analysis.targetEntry && (
                 <div className="rounded-lg border border-bull/20 bg-bull/5 p-2 text-center">
-                  <p className="text-xs text-neutral">Target Entry</p>
+                  <p className="text-xs text-neutral">{dict.ai.targetEntry}</p>
                   <p className="font-mono text-sm font-bold text-bull">{analysis.targetEntry}</p>
                 </div>
               )}
               {analysis.stopLoss && (
                 <div className="rounded-lg border border-bear/20 bg-bear/5 p-2 text-center">
-                  <p className="text-xs text-neutral">Stop Loss</p>
+                  <p className="text-xs text-neutral">{dict.ai.stopLoss}</p>
                   <p className="font-mono text-sm font-bold text-bear">{analysis.stopLoss}</p>
                 </div>
               )}
@@ -139,25 +148,25 @@ export function AIAnalysisPanel({ symbol }: Props) {
           {/* Bull / Bear / Risks */}
           <AnalysisSection
             icon={<TrendingUp className="h-4 w-4" />}
-            title="Bull Case"
+            title={dict.ai.bullCase}
             items={analysis.bullCase}
             color="text-bull"
           />
           <AnalysisSection
             icon={<TrendingDown className="h-4 w-4" />}
-            title="Bear Case"
+            title={dict.ai.bearCase}
             items={analysis.bearCase}
             color="text-bear"
           />
           <AnalysisSection
             icon={<AlertTriangle className="h-4 w-4" />}
-            title="Key Risks"
+            title={dict.ai.keyRisks}
             items={analysis.risks}
             color="text-warn"
           />
 
           <p className="text-[11px] text-neutral/50">
-            AI-generated analysis is for informational purposes only and does not constitute financial advice.
+            {dict.ai.disclaimer}
           </p>
         </div>
       )}
