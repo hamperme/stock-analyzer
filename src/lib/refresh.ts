@@ -291,10 +291,18 @@ export async function refreshRecentHistory(symbol: string): Promise<{
   source: string;
 }> {
   const normalized = symbol.toUpperCase();
-  const recent = await getYahooHistory(normalized, 30, true);
+  const existing = store.loadHistory(normalized)?.data ?? [];
+  // Reach back to the last stored bar so a long gap between refreshes is
+  // backfilled instead of leaving a hole (min 30 days, capped at 5 years).
+  // Internal holes (> 5 days between consecutive daily bars, longer than any
+  // weekend/holiday) are backfilled from their start as well.
+  const t = (d: string) => new Date(d.length <= 10 ? `${d}T00:00:00Z` : d).getTime();
+  const holeStart = existing.findIndex((b, i) => i > 0 && t(b.date) - t(existing[i - 1].date) > 5 * 86_400_000);
+  const from = holeStart > 0 ? existing[holeStart - 1].date : existing.at(-1)?.date;
+  const gapDays = from ? Math.ceil((Date.now() - t(from)) / 86_400_000) + 3 : 30;
+  const recent = await getYahooHistory(normalized, Math.min(1825, Math.max(30, gapDays)), true);
   if (!recent.length) throw new Error(`No recent history returned for ${normalized}`);
 
-  const existing = store.loadHistory(normalized)?.data ?? [];
   const merged = new Map<string, HistoricalBar>();
   for (const bar of existing) merged.set(bar.date, bar);
   for (const bar of recent) merged.set(bar.date, bar);
