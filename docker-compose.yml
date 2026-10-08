@@ -8,7 +8,6 @@ services:
     environment:
       # ── Required ──────────────────────────────────────────────────────────
       - FINNHUB_API_KEY=${FINNHUB_API_KEY}
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
       # ── Optional ──────────────────────────────────────────────────────────
       - WATCHLIST_SYMBOLS=${WATCHLIST_SYMBOLS:-AAPL,MSFT,GOOGL,NVDA,AMZN,META,BTC-USD,ETH-USD,SOL-USD}
       - TWELVEDATA_API_KEY=${TWELVEDATA_API_KEY:-}

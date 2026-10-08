@@ -1,10 +1,10 @@
 "use client";
 
 import { useEffect, useRef, useState, startTransition } from "react";
-import { Bot, Languages, MonitorCog, Moon, Settings2, Sparkles, Sun } from "lucide-react";
+import { Languages, MonitorCog, Moon, Settings2, Sun } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useSettings } from "@/components/app/SettingsProvider";
-import type { AppAiProvider, AppLocale, AppTheme } from "@/lib/app-settings";
+import type { AppLocale, AppTheme } from "@/lib/app-settings";
 
 function OptionButton({
   active,
@@ -38,11 +38,8 @@ export function SettingsButton() {
     dict,
     locale,
     theme,
-    aiProvider,
-    availableAiProviders,
     setLocale,
     setTheme,
-    setAiProvider,
   } = useSettings();
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -71,15 +68,6 @@ export function SettingsButton() {
     if (nextTheme === theme) return;
     setTheme(nextTheme);
     setOpen(false);
-  };
-
-  const changeAiProvider = (nextProvider: AppAiProvider) => {
-    if (nextProvider === aiProvider) return;
-    setAiProvider(nextProvider);
-    setOpen(false);
-    startTransition(() => {
-      router.refresh();
-    });
   };
 
   return (
@@ -136,32 +124,6 @@ export function SettingsButton() {
             </div>
           </div>
 
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-wider text-neutral">
-              {dict.settings.aiProvider}
-            </p>
-            {availableAiProviders.length > 0 ? (
-              <div className="mt-2 grid grid-cols-1 gap-2">
-                {availableAiProviders.map((provider) => (
-                  <OptionButton
-                    key={provider}
-                    active={aiProvider === provider}
-                    icon={provider === "gemini"
-                      ? <Sparkles className="h-4 w-4" />
-                      : provider === "openai"
-                      ? <Bot className="h-4 w-4" />
-                      : <Bot className="h-4 w-4" />}
-                    label={dict.settings.providers[provider]}
-                    onClick={() => changeAiProvider(provider)}
-                  />
-                ))}
-              </div>
-            ) : (
-              <p className="mt-2 text-xs leading-relaxed text-neutral/70">
-                {dict.settings.noAiProviders}
-              </p>
-            )}
-          </div>
         </div>
       )}
     </div>

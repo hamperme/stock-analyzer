@@ -100,26 +100,18 @@ function curlGet(url: string): unknown {
   return JSON.parse(stdout);
 }
 
-// v8 fetch with throttle + exponential backoff on 429
+// v8 fetch with a fast circuit breaker. Yahoo commonly rejects Node's TLS
+// fingerprint while accepting curl from the same host. Retrying the identical
+// fingerprint only adds 6–14 seconds, so the first 429 immediately opens the
+// breaker and lets callers use the curl transport.
 async function yfFetch(url: string): Promise<unknown> {
   if (isV8Blocked()) throw new Error("HTTP 429 (v8 circuit breaker active)");
-
-  const delays = [2_000, 4_000, 8_000];
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      return await throttledFetch(() => httpsGet(url));
-    } catch (err) {
-      const msg = (err as Error).message;
-      if (msg.includes("HTTP 429")) {
-        if (attempt === 2) { markV8Blocked(60_000); throw err; } // 60 s after 3 failures
-        console.warn(`[yahoo] 429 on attempt ${attempt + 1}, waiting ${delays[attempt] / 1000}s…`);
-        await sleep(delays[attempt]);
-      } else {
-        throw err;
-      }
-    }
+  try {
+    return await throttledFetch(() => httpsGet(url));
+  } catch (err) {
+    if ((err as Error).message.includes("HTTP 429")) markV8Blocked(30 * 60_000);
+    throw err;
   }
-  throw new Error(`Max retries exceeded: ${url}`);
 }
 
 // Spark fetch with throttle + circuit breaker
@@ -202,10 +194,11 @@ export async function getQuote(symbol: string): Promise<StockQuote> {
 // Tries Node.js https first, falls back to curl if 429'd.
 export async function getHistoricalData(
   symbol: string,
-  days = 365
+  days = 365,
+  forceRefresh = false
 ): Promise<HistoricalBar[]> {
   const key = `history:${symbol}:${days}`;
-  const cached = cache.get<HistoricalBar[]>(key);
+  const cached = forceRefresh ? null : cache.get<HistoricalBar[]>(key);
   if (cached) return cached;
 
   const range =
@@ -312,6 +305,46 @@ export async function getHistoricalDataSpark(
     .filter((b) => b.close > 0);
 
   cache.set(key, bars, TTL.HISTORY);
+  return bars;
+}
+
+/** Live intraday OHLCV. Yahoo supports 1m/5m/15m/1h; 4h is aggregated by caller. */
+export async function getIntradayData(
+  symbol: string,
+  interval: "1m" | "5m" | "15m" | "1h",
+  range: string,
+  forceRefresh = false
+): Promise<HistoricalBar[]> {
+  const key = `intraday:${symbol}:${interval}:${range}`;
+  const cached = forceRefresh ? null : cache.get<HistoricalBar[]>(key);
+  if (cached) return cached;
+
+  const allowedRange = interval === "1m"
+    ? (range === "1d" ? "1d" : "5d")
+    : interval === "5m" || interval === "15m"
+      ? ({ "1d": "1d", "5d": "5d", "1m": "1mo" }[range] ?? "1mo")
+      : (range === "all" || range === "2y" ? "2y" : "1y"); // keep 250+ warm-up bars for MA/ADX/MACD
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${interval}&range=${allowedRange}&includePrePost=true`;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let raw: any;
+  try { raw = await yfFetch(url); }
+  catch (err) {
+    console.warn(`[yahoo/${symbol}] intraday https failed (${(err as Error).message}), using curl`);
+    raw = curlGet(url);
+  }
+  const result = raw?.chart?.result?.[0];
+  if (!result) throw new Error(`No intraday chart data for ${symbol}`);
+  const timestamps: number[] = result.timestamp ?? [];
+  const quote = result.indicators?.quote?.[0] ?? {};
+  const bars = timestamps.map((ts, i) => ({
+    date: new Date(ts * 1000).toISOString(),
+    open: Number(quote.open?.[i] ?? 0),
+    high: Number(quote.high?.[i] ?? 0),
+    low: Number(quote.low?.[i] ?? 0),
+    close: Number(quote.close?.[i] ?? 0),
+    volume: Number(quote.volume?.[i] ?? 0),
+  })).filter((b) => b.close > 0 && b.open > 0 && b.high > 0 && b.low > 0);
+  cache.set(key, bars, 60_000);
   return bars;
 }
 

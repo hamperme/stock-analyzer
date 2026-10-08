@@ -37,8 +37,9 @@ export const TTL = {
   HISTORY: 6 * 60 * 60_000,  // 6 hours  — daily bars don't change intraday
   NEWS: 10 * 60_000,         // 10 minutes
   FEAR_GREED: 15 * 60_000,   // 15 minutes
-  ANALYSIS: 30 * 60_000,     // 30 minutes
   INDICES: 60_000,           // 1 minute
   MACRO_SNAPSHOT: 15 * 60_000, // 15 minutes — raw data layer
   MACRO_VIEW: 30 * 60_000,    // 30 minutes — synthesized view
+  DERIVATIVES: 60_000,        // 1 minute — public futures market data
+  OPTIONS: 5 * 60_000,        // 5 minutes — delayed US options chain
 };

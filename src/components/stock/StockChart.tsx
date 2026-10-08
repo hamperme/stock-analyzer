@@ -18,8 +18,7 @@ import {
   Customized,
   Cell,
 } from "recharts";
-import { format, parseISO, formatDistanceToNow } from "date-fns";
-import { zhCN } from "date-fns/locale";
+import { format, parseISO } from "date-fns";
 import {
   ChevronDown,
   Activity,
@@ -30,11 +29,10 @@ import {
   MousePointer2,
   RotateCcw,
   Crosshair,
-  Sparkles,
-  Loader2,
-  Eye,
+  PenLine,
+  Trash2,
 } from "lucide-react";
-import type { ChartDataPoint, SetupAnalysis, SetupAnalysisInput, ActiveIndicatorSnapshot, IndicatorStructuredData, MacroContextPayload } from "@/lib/types";
+import type { ChartDataPoint, ChartDrawing } from "@/lib/types";
 import {
   calculateBollingerBands,
   calculateStochastic,
@@ -46,7 +44,6 @@ import {
   calculateFibExtensionLevels,
   calculateIchimoku,
 } from "@/lib/calculations";
-import { useSettings } from "@/components/app/SettingsProvider";
 
 // ─── Range & Interval Options ────────────────────────────────────────────────
 
@@ -61,7 +58,11 @@ const RANGES = [
 ] as const;
 
 const INTERVALS = [
+  { label: "1m", value: "1m" },
+  { label: "5m", value: "5m" },
+  { label: "15m", value: "15m" },
   { label: "1H", value: "1h" },
+  { label: "4H", value: "4h" },
   { label: "1D", value: "1d" },
   { label: "1W", value: "1w" },
   { label: "1M", value: "1mo" },
@@ -364,12 +365,14 @@ const PANE_WARN_THRESHOLD = 3;     // warn when ≥ 3 oscillator panes active
 
 interface Props {
   data: ChartDataPoint[];
-  symbol?: string;
+  calculationData?: ChartDataPoint[];
+  drawings?: ChartDrawing[];
   activeRange?: RangeValue;
   activeInterval?: IntervalValue;
   intradaySupported?: boolean;
   onRangeChange?: (range: RangeValue) => void;
   onIntervalChange?: (interval: IntervalValue) => void;
+  onClearDrawings?: () => void;
   loading?: boolean;
   error?: string | null;
 }
@@ -491,7 +494,7 @@ function PriceTooltip({ active, payload, label, isCandle }: any) {
   return (
     <div className="rounded-lg border border-surface-border bg-surface/95 backdrop-blur-sm p-2.5 shadow-xl text-xs z-50 max-w-[220px]">
       <p className="mb-1.5 font-semibold text-slate-200 text-[11px]">
-        {label ? format(parseISO(label), "MMM d, yyyy") : ""}
+        {label ? format(parseISO(label), label.includes("T") ? "MMM d, yyyy HH:mm" : "MMM d, yyyy") : ""}
       </p>
 
       {/* OHLC row in candle mode */}
@@ -550,6 +553,7 @@ function OscTooltip({ active, payload, label, unit }: any) {
 function formatXAxis(dateStr: string, dataLen: number) {
   try {
     const d = parseISO(dateStr);
+    if (dateStr.includes("T")) return format(d, dataLen > 400 ? "MMM d" : "MMM d HH:mm");
     return dataLen > 200 ? format(d, "MMM yy") : format(d, "MMM d");
   } catch {
     return dateStr;
@@ -581,22 +585,175 @@ function OscPane({
   );
 }
 
+// ─── Provider-neutral model drawing layer ───────────────────────────────────
+
+interface DrawingLayerProps {
+  drawings: ChartDrawing[];
+  data: ChartDataPoint[];
+  // Recharts does not export a stable public type for Customized payloads.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  chartProps: any;
+}
+
+function ModelDrawingLayer({ drawings, data, chartProps }: DrawingLayerProps) {
+  const xAx = chartProps.xAxisMap && Object.values(chartProps.xAxisMap)[0] as
+    { scale?: (value: string) => number; bandSize?: number } | undefined;
+  const yAx = chartProps.yAxisMap && Object.values(chartProps.yAxisMap)[0] as
+    { scale?: (value: number) => number } | undefined;
+  if (!xAx?.scale || !yAx?.scale || !data.length || !drawings.length) return <g />;
+
+  const offset = chartProps.offset as { left?: number; top?: number; width?: number; height?: number } | undefined;
+  const bandHalf = (xAx.bandSize ?? 0) / 2;
+  const xValues = data.map((bar) => ({ date: bar.date, time: Date.parse(bar.date) }));
+  const nearestDate = (date: string) => {
+    const target = Date.parse(date);
+    if (!Number.isFinite(target)) return xValues[0].date;
+    let best = xValues[0];
+    let distance = Math.abs(best.time - target);
+    for (let i = 1; i < xValues.length; i++) {
+      const nextDistance = Math.abs(xValues[i].time - target);
+      if (nextDistance < distance) { best = xValues[i]; distance = nextDistance; }
+    }
+    return best.date;
+  };
+  const xy = (point: ChartDrawing["points"][number]) => ({
+    x: xAx.scale!(nearestDate(point.date)) + bandHalf,
+    y: yAx.scale!(point.price),
+  });
+
+  const firstX = xAx.scale(data[0].date) + bandHalf;
+  const lastX = xAx.scale(data[data.length - 1].date) + bandHalf;
+  const left = offset?.left ?? Math.min(firstX, lastX);
+  const right = offset?.width ? left + offset.width : Math.max(firstX, lastX);
+  const top = offset?.top ?? CHART_MARGIN.top;
+  const bottom = offset?.height ? top + offset.height : CHART_HEIGHT;
+  const clipId = "model-drawing-clip";
+
+  const extendedSegment = (
+    a: { x: number; y: number },
+    b: { x: number; y: number },
+    extendLeft: boolean,
+    extendRight: boolean,
+  ) => {
+    const dx = b.x - a.x;
+    if (Math.abs(dx) < 0.001) return { a, b };
+    const yAt = (x: number) => a.y + ((x - a.x) / dx) * (b.y - a.y);
+    return {
+      a: extendLeft ? { x: left, y: yAt(left) } : a,
+      b: extendRight ? { x: right, y: yAt(right) } : b,
+    };
+  };
+
+  const labelNode = (drawing: ChartDrawing, x: number, y: number, color: string) => drawing.label ? (
+    <text x={x + 5} y={y - 6} fill={color} fontSize={10} fontWeight={600}
+      stroke="#070711" strokeWidth={3} paintOrder="stroke" opacity={drawing.style?.opacity ?? 0.9}>
+      {drawing.label}
+    </text>
+  ) : null;
+
+  return (
+    <g className="model-drawings">
+      <defs>
+        <clipPath id={clipId}><rect x={left} y={top} width={Math.max(0, right - left)} height={Math.max(0, bottom - top)} /></clipPath>
+        {drawings.filter((drawing) => drawing.kind === "arrow").map((drawing) => (
+          <marker key={`marker-${drawing.id}`} id={`arrow-${drawing.id.replace(/[^a-zA-Z0-9_-]/g, "-")}`}
+            markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+            <path d="M0,0 L8,4 L0,8 z" fill={drawing.style?.color ?? "#38bdf8"} />
+          </marker>
+        ))}
+      </defs>
+      <g clipPath={`url(#${clipId})`}>
+        {drawings.map((drawing) => {
+          if (drawing.visible === false) return null;
+          const color = drawing.style?.color ?? "#38bdf8";
+          const width = drawing.style?.width ?? 1.5;
+          const opacity = drawing.style?.opacity ?? 0.9;
+          const dash = drawing.style?.dash;
+          const points = drawing.points.map(xy);
+          const common = { stroke: color, strokeWidth: width, strokeOpacity: opacity, strokeDasharray: dash };
+
+          if (drawing.kind === "horizontal") {
+            const y = points[0].y;
+            return <g key={drawing.id}><line x1={left} x2={right} y1={y} y2={y} {...common} />{labelNode(drawing, left + 4, y, color)}</g>;
+          }
+          if (drawing.kind === "vertical") {
+            const x = points[0].x;
+            return <g key={drawing.id}><line x1={x} x2={x} y1={top} y2={bottom} {...common} />{labelNode(drawing, x, top + 16, color)}</g>;
+          }
+          if (drawing.kind === "label") {
+            return <g key={drawing.id}>
+              <circle cx={points[0].x} cy={points[0].y} r={3} fill={color} opacity={opacity} />
+              {labelNode(drawing, points[0].x, points[0].y, color)}
+            </g>;
+          }
+          if (drawing.kind === "rectangle") {
+            const [a, b] = points;
+            const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
+            return <g key={drawing.id}>
+              <rect x={x} y={y} width={Math.abs(b.x - a.x)} height={Math.abs(b.y - a.y)}
+                fill={drawing.style?.fill ?? color} fillOpacity={drawing.style?.fillOpacity ?? 0.08} {...common} />
+              {labelNode(drawing, x, y, color)}
+            </g>;
+          }
+          if (drawing.kind === "channel") {
+            const [a, b, c] = points;
+            const parallelEnd = { x: c.x + (b.x - a.x), y: c.y + (b.y - a.y) };
+            const main = extendedSegment(a, b, Boolean(drawing.extendLeft), Boolean(drawing.extendRight));
+            const parallel = extendedSegment(c, parallelEnd, Boolean(drawing.extendLeft), Boolean(drawing.extendRight));
+            return <g key={drawing.id}>
+              <polygon points={`${main.a.x},${main.a.y} ${main.b.x},${main.b.y} ${parallel.b.x},${parallel.b.y} ${parallel.a.x},${parallel.a.y}`}
+                fill={drawing.style?.fill ?? color} fillOpacity={drawing.style?.fillOpacity ?? 0.06} />
+              <line x1={main.a.x} y1={main.a.y} x2={main.b.x} y2={main.b.y} {...common} />
+              <line x1={parallel.a.x} y1={parallel.a.y} x2={parallel.b.x} y2={parallel.b.y} {...common} />
+              {labelNode(drawing, main.a.x, main.a.y, color)}
+            </g>;
+          }
+          if (drawing.kind === "polyline") {
+            return <g key={drawing.id}>
+              <polyline points={points.map((point) => `${point.x},${point.y}`).join(" ")}
+                fill="none" {...common} />
+              {labelNode(drawing, points[0].x, points[0].y, color)}
+            </g>;
+          }
+
+          const [a, b] = points;
+          const isRay = drawing.kind === "ray";
+          const rayRight = isRay && b.x >= a.x;
+          const rayLeft = isRay && b.x < a.x;
+          const segment = extendedSegment(
+            a,
+            b,
+            rayLeft || Boolean(drawing.extendLeft),
+            rayRight || Boolean(drawing.extendRight),
+          );
+          const markerEnd = drawing.kind === "arrow" ? `url(#arrow-${drawing.id.replace(/[^a-zA-Z0-9_-]/g, "-")})` : undefined;
+          return <g key={drawing.id}>
+            <line x1={segment.a.x} y1={segment.a.y} x2={segment.b.x} y2={segment.b.y} markerEnd={markerEnd} {...common} />
+            {labelNode(drawing, (a.x + b.x) / 2, (a.y + b.y) / 2, color)}
+          </g>;
+        })}
+      </g>
+    </g>
+  );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Main Component
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export function StockChart({
   data,
-  symbol,
+  calculationData,
+  drawings = [],
   activeRange = "6m",
   activeInterval = "1d",
   intradaySupported = false,
   onRangeChange,
   onIntervalChange,
+  onClearDrawings,
   loading,
   error,
 }: Props) {
-  const { locale, aiProvider } = useSettings();
   const [localRange, setLocalRange] = useState<RangeValue>(activeRange);
   const [localInterval, setLocalInterval] = useState<IntervalValue>(activeInterval);
   const [indicators, setIndicators] = useState<IndicatorState>(DEFAULT_INDICATORS);
@@ -604,6 +761,7 @@ export function StockChart({
   const [chartType, setChartType] = useState<ChartType>("line");
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const [containerSize, setContainerSize] = useState({ w: 800, h: CHART_HEIGHT });
+  const indicatorBarCount = calculationData?.length ?? data.length;
 
   // Track real container dimensions for Fib label layout
   useEffect(() => {
@@ -624,10 +782,6 @@ export function StockChart({
   const [anchors, setAnchors] = useState<ChartAnchor[]>([]);
 
   // ─── Setup analysis state ──────────────────────────────────────────────
-  const [setupAnalysis, setSetupAnalysis] = useState<SetupAnalysis | null>(null);
-  const [setupLoading, setSetupLoading] = useState(false);
-  const [setupError, setSetupError] = useState<string | null>(null);
-  const previousSettingsRef = useRef({ locale, aiProvider });
 
   const range = onRangeChange ? activeRange : localRange;
   const interval = onIntervalChange ? activeInterval : localInterval;
@@ -670,356 +824,6 @@ export function StockChart({
     [anchorMode, anchors],
   );
 
-  // ─── Analyze Current Setup ──────────────────────────────────────────────
-  const analyzeSetup = useCallback(async () => {
-    if (!symbol || !data.length) return;
-    setSetupLoading(true);
-    setSetupError(null);
-
-    const lastBar = data[data.length - 1];
-    const price = lastBar.close;
-    const closes = data.map((d) => d.close);
-    const highs = data.map((d) => d.high);
-    const lows = data.map((d) => d.low);
-    const n = data.length;
-
-    const snaps: ActiveIndicatorSnapshot[] = [];
-
-    // ── Fetch structured macro context (non-blocking — proceeds without it) ──
-    let macroContext: MacroContextPayload | null = null;
-    try {
-      const macroRes = await fetch("/api/macro-view");
-      const macroJson = await macroRes.json();
-      if (macroJson.data) {
-        const mv = macroJson.data;
-        const snap = mv.snapshot;
-        const vixVal = snap?.vix?.value ?? null;
-        macroContext = {
-          regime: mv.regime,
-          confidence: mv.confidence?.level ?? "Low",
-          confidenceScore: mv.confidence?.score ?? 0,
-          isStale: mv.confidence?.isStale ?? false,
-          bullDrivers: (mv.bullPoints ?? []).slice(0, 3),
-          bearDrivers: (mv.bearPoints ?? []).slice(0, 3),
-          watchNext: (mv.watchItems ?? []).slice(0, 2),
-          summary: mv.neutralSummary ?? "",
-          policyBias: snap?.policyPath?.bias ?? null,
-          volatility: vixVal != null ? {
-            vix: vixVal,
-            regime: vixVal >= 30 ? "extreme" as const : vixVal >= 25 ? "high" as const : vixVal >= 18 ? "elevated" as const : "low" as const,
-          } : null,
-          breadth: snap?.breadth?.assessment ?? null,
-          fearGreed: snap?.fearGreed ?? null,
-        };
-      }
-    } catch {
-      // macro context is optional — proceed without it
-    }
-
-    if (indicators.bollinger && n >= 20) {
-      const { calculateBollingerBands: calcBB } = await import("@/lib/calculations");
-      const bb = calcBB(closes);
-      const last = bb[bb.length - 1];
-      if (last?.upper != null && last.middle != null && last.lower != null) {
-        const bw = last.upper - last.lower;
-        const pctB = bw > 0 ? (price - last.lower) / bw * 100 : 50;
-        const structured: IndicatorStructuredData = {
-          bollinger: { upper: last.upper, middle: last.middle, lower: last.lower, bandwidth: bw, percentB: Math.round(pctB) },
-        };
-        snaps.push({ name: "Bollinger Bands", state: `Upper: ${last.upper.toFixed(2)}, Mid: ${last.middle.toFixed(2)}, Lower: ${last.lower.toFixed(2)} — price at ${pctB.toFixed(0)}% of band width`, structured });
-      }
-    }
-
-    if (indicators.stochastic && n >= 14) {
-      const { calculateStochastic: calcSt } = await import("@/lib/calculations");
-      const st = calcSt(highs, lows, closes);
-      const last = st[st.length - 1];
-      if (last?.k != null && last.d != null) {
-        const zone: "overbought" | "oversold" | "neutral" = last.k > 80 ? "overbought" : last.k < 20 ? "oversold" : "neutral";
-        const crossover: "bullish" | "bearish" | "none" = last.k > last.d ? "bullish" : last.k < last.d ? "bearish" : "none";
-        const zoneLabel = zone === "neutral" ? "neutral zone" : zone;
-        const crossLabel = crossover === "bullish" ? "K above D (bullish)" : crossover === "bearish" ? "K below D (bearish)" : "converging";
-        const structured: IndicatorStructuredData = {
-          stochastic: { k: last.k, d: last.d, zone, crossover },
-        };
-        snaps.push({ name: "Stochastic (14,3)", state: `K: ${last.k.toFixed(1)}, D: ${last.d.toFixed(1)} — ${zoneLabel}, ${crossLabel}`, structured });
-      }
-    }
-
-    if (indicators.macd && n >= 26) {
-      const { calculateMACD: calcM } = await import("@/lib/calculations");
-      const m = calcM(closes);
-      const last = m[m.length - 1];
-      if (last?.macd != null && last.signal != null && last.histogram != null) {
-        const histogramSign: "positive" | "negative" | "zero" = last.histogram > 0 ? "positive" : last.histogram < 0 ? "negative" : "zero";
-        const crossover: "bullish" | "bearish" | "none" = last.macd > last.signal ? "bullish" : last.macd < last.signal ? "bearish" : "none";
-        const crossLabel = crossover === "bullish" ? "MACD above signal (bullish)" : "MACD below signal (bearish)";
-        const structured: IndicatorStructuredData = {
-          macd: { macd: last.macd, signal: last.signal, histogram: last.histogram, histogramSign, crossover },
-        };
-        snaps.push({ name: "MACD (12,26,9)", state: `MACD: ${last.macd.toFixed(3)}, Signal: ${last.signal.toFixed(3)}, Histogram: ${last.histogram.toFixed(3)} (${histogramSign}) — ${crossLabel}`, structured });
-      }
-    }
-
-    if (indicators.adx && n >= 28) {
-      const { calculateADX: calcA } = await import("@/lib/calculations");
-      const a = calcA(highs, lows, closes);
-      const last = a[a.length - 1];
-      if (last?.adx != null && last.plusDI != null && last.minusDI != null) {
-        const trendStrength: "strong" | "trending" | "weak" | "none" = last.adx > 40 ? "strong" : last.adx > 25 ? "trending" : last.adx > 20 ? "weak" : "none";
-        const direction: "bullish" | "bearish" = last.plusDI > last.minusDI ? "bullish" : "bearish";
-        const strengthLabel = trendStrength === "strong" ? "strong trend" : trendStrength === "trending" ? "trending" : trendStrength === "weak" ? "weak trend" : "no trend / range-bound";
-        const dirLabel = direction === "bullish" ? "+DI > -DI (bullish directional)" : "-DI > +DI (bearish directional)";
-        const structured: IndicatorStructuredData = {
-          adx: { adx: last.adx, plusDI: last.plusDI, minusDI: last.minusDI, trendStrength, direction },
-        };
-        snaps.push({ name: "ADX (14)", state: `ADX: ${last.adx.toFixed(1)}, +DI: ${last.plusDI.toFixed(1)}, -DI: ${last.minusDI.toFixed(1)} — ${strengthLabel}, ${dirLabel}`, structured });
-      }
-    }
-
-    if (indicators.ichimoku && n >= 52) {
-      const { calculateIchimoku: calcI } = await import("@/lib/calculations");
-      const ichi = calcI(highs, lows, closes);
-      const last = ichi[n - 1];
-      if (last) {
-        const parts: string[] = [];
-        let tenkanAboveKijun: boolean | null = null;
-        let priceVsCloud: "above" | "below" | "inside" = "inside";
-        let cloudColor: "green" | "red" | null = null;
-
-        if (last.tenkan !== undefined && last.kijun !== undefined) {
-          tenkanAboveKijun = last.tenkan > last.kijun;
-          parts.push(tenkanAboveKijun ? "Tenkan above Kijun (bullish)" : "Tenkan below Kijun (bearish)");
-        }
-        if (last.senkouA !== undefined && last.senkouB !== undefined) {
-          const cloudTop = Math.max(last.senkouA, last.senkouB);
-          const cloudBot = Math.min(last.senkouA, last.senkouB);
-          if (price > cloudTop) { priceVsCloud = "above"; parts.push("price above cloud (bullish)"); }
-          else if (price < cloudBot) { priceVsCloud = "below"; parts.push("price below cloud (bearish)"); }
-          else { priceVsCloud = "inside"; parts.push("price inside cloud (indecisive)"); }
-          cloudColor = last.senkouA > last.senkouB ? "green" : "red";
-          parts.push(cloudColor === "green" ? "green cloud" : "red cloud");
-        }
-        const structured: IndicatorStructuredData = {
-          ichimoku: { tenkanAboveKijun, priceVsCloud, cloudColor },
-        };
-        snaps.push({ name: "Ichimoku Cloud", state: parts.join(", "), structured });
-      }
-    }
-
-    if (indicators.fibRetracement && n >= 20) {
-      const { findSwingPoints, calculateFibRetracementLevels } = await import("@/lib/calculations");
-      const swing = findSwingPoints(highs, lows);
-      const highFirst = swing.swingHighIdx < swing.swingLowIdx;
-      const levels = calculateFibRetracementLevels(swing.swingHigh, swing.swingLow, highFirst);
-      let nearest = levels[0];
-      for (const l of levels) {
-        if (Math.abs(price - l.price) < Math.abs(price - nearest.price)) nearest = l;
-      }
-      const structured: IndicatorStructuredData = {
-        fibRetracement: { nearestLevel: nearest.ratio, nearestPrice: nearest.price, priceDistance: price - nearest.price },
-      };
-      snaps.push({ name: "Fib Retracement", state: `Nearest level: ${(nearest.ratio * 100).toFixed(1)}% at $${nearest.price.toFixed(2)} (price: $${price.toFixed(2)})`, structured });
-    }
-
-    if (indicators.fibExtension && n >= 20) {
-      const { findSwingPoints, calculateFibExtensionLevels } = await import("@/lib/calculations");
-      const swing = findSwingPoints(highs, lows);
-      const highFirst = swing.swingHighIdx < swing.swingLowIdx;
-      const levels = calculateFibExtensionLevels(swing.swingHigh, swing.swingLow, highFirst);
-      let nearest = levels[0];
-      for (const l of levels) {
-        if (Math.abs(price - l.price) < Math.abs(price - nearest.price)) nearest = l;
-      }
-      const structured: IndicatorStructuredData = {
-        fibExtension: { nearestLevel: nearest.ratio, nearestPrice: nearest.price, priceDistance: price - nearest.price },
-      };
-      snaps.push({ name: "Fib Extension", state: `Nearest level: ${(nearest.ratio * 100).toFixed(1)}% at $${nearest.price.toFixed(2)} (price: $${price.toFixed(2)})`, structured });
-    }
-
-    if (indicators.stdDev && n >= 20) {
-      const { calculateRollingStdDev } = await import("@/lib/calculations");
-      const sd = calculateRollingStdDev(closes);
-      const last = sd[sd.length - 1];
-      if (last && last.stdDev !== undefined) {
-        const pctOfPrice = price > 0 ? last.stdDev / price * 100 : 0;
-        const structured: IndicatorStructuredData = {
-          stdDev: { value: last.stdDev, percentOfPrice: Math.round(pctOfPrice * 100) / 100 },
-        };
-        snaps.push({ name: "Rolling Std Dev", state: `StdDev: ${last.stdDev.toFixed(3)} (${pctOfPrice.toFixed(2)}% of price)`, structured });
-      }
-    }
-
-    if (indicators.pitchfork && anchors.length === MAX_PITCHFORK_ANCHORS) {
-      // ── Compute Pitchfork geometry in price space ──
-      // Andrews' Pitchfork: A1 = pivot, A2 = upper anchor, A3 = lower anchor
-      // Median line runs from A1 through midpoint(A2, A3).
-      // Tines are parallel to median through A2/A3.
-      // Warning lines at 2× perpendicular offset from median.
-      const [a1, a2, a3] = anchors;
-      const a1Idx = data.findIndex(d => d.date === a1.date);
-      const a2Idx = data.findIndex(d => d.date === a2.date);
-      const a3Idx = data.findIndex(d => d.date === a3.date);
-      const lastIdx = n - 1;
-
-      if (a1Idx >= 0 && a2Idx >= 0 && a3Idx >= 0 && lastIdx > a1Idx) {
-        // Midpoint of A2-A3
-        const midPrice = (a2.price + a3.price) / 2;
-        const midIdx = (a2Idx + a3Idx) / 2;
-
-        // Median line: from (a1Idx, a1.price) through (midIdx, midPrice)
-        const medDIdx = midIdx - a1Idx;
-        const medDPrice = midPrice - a1.price;
-
-        if (Math.abs(medDIdx) > 0) {
-          const slope = medDPrice / medDIdx; // price per bar
-
-          // Price on median at the last bar
-          const medianAtLast = a1.price + slope * (lastIdx - a1Idx);
-
-          // Upper tine passes through A2, parallel to median
-          const upperTineAtLast = a2.price + slope * (lastIdx - a2Idx);
-
-          // Lower tine passes through A3, parallel to median
-          const lowerTineAtLast = a3.price + slope * (lastIdx - a3Idx);
-
-          // Perpendicular offset from median to tines (in price, at their anchor x)
-          const offsetUpper = a2.price - (a1.price + slope * (a2Idx - a1Idx));
-          const offsetLower = a3.price - (a1.price + slope * (a3Idx - a1Idx));
-
-          // Warning lines at 2× offset
-          const upperWarnAtLast = medianAtLast + 2 * offsetUpper;
-          const lowerWarnAtLast = medianAtLast + 2 * offsetLower;
-
-          // Tine-to-tine width at last bar
-          const tineWidth = Math.abs(upperTineAtLast - lowerTineAtLast);
-          const distFromMedian = price - medianAtLast;
-          const distFromMedianPct = tineWidth > 0 ? Math.round((distFromMedian / (tineWidth / 2)) * 100) : 0;
-
-          const nearThreshold = tineWidth > 0 ? tineWidth * 0.08 : price * 0.005;
-          const classify = (p: number, line: number): "above" | "below" | "near" =>
-            Math.abs(p - line) < nearThreshold ? "near" : p > line ? "above" : "below";
-
-          const priceVsMedian = classify(price, medianAtLast);
-          const priceVsUpperTine = classify(price, upperTineAtLast);
-          const priceVsLowerTine = classify(price, lowerTineAtLast);
-          const priceVsUpperWarning = classify(price, upperWarnAtLast);
-          const priceVsLowerWarning = classify(price, lowerWarnAtLast);
-
-          // Qualitative position
-          let position: NonNullable<IndicatorStructuredData["pitchfork"]>["position"];
-          if (price > upperWarnAtLast + nearThreshold) position = "above-upper-warning";
-          else if (priceVsUpperWarning === "near" || (price > upperTineAtLast && price <= upperWarnAtLast + nearThreshold)) position = "upper-warning-zone";
-          else if (price > medianAtLast + nearThreshold && price <= upperTineAtLast + nearThreshold) position = "upper-half";
-          else if (priceVsMedian === "near") position = "near-median";
-          else if (price < medianAtLast - nearThreshold && price >= lowerTineAtLast - nearThreshold) position = "lower-half";
-          else if (priceVsLowerWarning === "near" || (price < lowerTineAtLast && price >= lowerWarnAtLast - nearThreshold)) position = "lower-warning-zone";
-          else position = "below-lower-warning";
-
-          // Detect mean-reversion: price was further from median 3 bars ago than now
-          let reverting = false;
-          if (n >= 4) {
-            const prevIdx = lastIdx - 3;
-            const medianAtPrev = a1.price + slope * (prevIdx - a1Idx);
-            const prevDist = Math.abs(data[prevIdx].close - medianAtPrev);
-            reverting = prevDist > Math.abs(distFromMedian) && Math.abs(distFromMedian) > nearThreshold * 0.5;
-          }
-
-          const medianSlope: "rising" | "falling" | "flat" = slope > 0.001 * price ? "rising" : slope < -0.001 * price ? "falling" : "flat";
-
-          // Build state string
-          const posLabel = position.replace(/-/g, " ");
-          const slopeLabel = medianSlope === "rising" ? "rising median" : medianSlope === "falling" ? "falling median" : "flat median";
-          const revertLabel = reverting ? ", reverting toward median" : "";
-          const stateStr = `Price in ${posLabel} (${distFromMedianPct > 0 ? "+" : ""}${distFromMedianPct}% from median), ${slopeLabel}${revertLabel}. Anchors: A1=$${a1.price.toFixed(2)}, A2=$${a2.price.toFixed(2)}, A3=$${a3.price.toFixed(2)}`;
-
-          const structured: IndicatorStructuredData = {
-            pitchfork: {
-              priceVsMedian,
-              priceVsUpperTine,
-              priceVsLowerTine,
-              priceVsUpperWarning,
-              priceVsLowerWarning,
-              distFromMedianPct,
-              position,
-              reverting,
-              anchors: { a1: a1.price, a2: a2.price, a3: a3.price },
-              medianSlope,
-            },
-          };
-          snaps.push({ name: "Andrews' Pitchfork", state: stateStr, structured });
-        }
-      } else {
-        // Anchors don't map to data — just pass basic info
-        snaps.push({ name: "Andrews' Pitchfork", state: `3-anchor pitchfork active (${anchors.map((a, i) => `A${i+1}: $${a.price.toFixed(2)}`).join(", ")})` });
-      }
-    }
-
-    // MA context (always available)
-    if (n >= 20) {
-      const ma20 = closes.slice(-20).reduce((s, v) => s + v, 0) / 20;
-      const ma50 = n >= 50 ? closes.slice(-50).reduce((s, v) => s + v, 0) / 50 : null;
-      const ma200 = n >= 200 ? closes.slice(-200).reduce((s, v) => s + v, 0) / 200 : null;
-      const parts = [`MA20: $${ma20.toFixed(2)}`];
-      if (ma50) parts.push(`MA50: $${ma50.toFixed(2)}`);
-      if (ma200) parts.push(`MA200: $${ma200.toFixed(2)}`);
-      const alignment: "bullish" | "bearish" | "mixed" = ma50 && ma200
-        ? (ma20 > ma50 && ma50 > ma200 ? "bullish" : ma20 < ma50 && ma50 < ma200 ? "bearish" : "mixed")
-        : "mixed";
-      const alignmentLabel = alignment === "bullish" ? "bullish alignment" : alignment === "bearish" ? "bearish alignment" : "mixed alignment";
-      const structured: IndicatorStructuredData = {
-        movingAverages: { ma20, ma50, ma200, alignment },
-      };
-      snaps.push({ name: "Moving Averages", state: `${parts.join(", ")} — price $${price.toFixed(2)} ${alignmentLabel}`, structured });
-    }
-
-    const input: SetupAnalysisInput = {
-      symbol,
-      locale,
-      provider: aiProvider,
-      price,
-      range,
-      interval,
-      chartType,
-      activeIndicators: snaps,
-      macroContext,
-    };
-
-    try {
-      const res = await fetch(`/api/stock/${symbol}/setup-analysis`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(input),
-      });
-      const json = await res.json();
-      if (json.error) throw new Error(json.error);
-      setSetupAnalysis(json.data);
-    } catch (e) {
-      setSetupError(e instanceof Error ? e.message : "Failed to analyze setup");
-    } finally {
-      setSetupLoading(false);
-    }
-  }, [symbol, data, indicators, anchors, range, interval, chartType, locale, aiProvider]);
-
-  // Clear setup analysis when indicators or range change
-  useEffect(() => {
-    setSetupAnalysis(null);
-    setSetupError(null);
-  }, [indicators, range, interval, chartType]);
-
-  useEffect(() => {
-    if (
-      previousSettingsRef.current.locale === locale &&
-      previousSettingsRef.current.aiProvider === aiProvider
-    ) {
-      return;
-    }
-    previousSettingsRef.current = { locale, aiProvider };
-    if (setupAnalysis && !setupLoading) {
-      void analyzeSetup();
-    }
-  }, [locale, aiProvider, analyzeSetup, setupAnalysis, setupLoading]);
-
   // ─── Derived counts ─────────────────────────────────────────────────────
   const overlayCount = useMemo(() =>
     [indicators.bollinger, indicators.fibRetracement, indicators.fibExtension, indicators.ichimoku].filter(Boolean).length,
@@ -1034,20 +838,20 @@ export function StockChart({
   // ─── Compute enriched data ──────────────────────────────────────────────
   const enriched = useMemo<EnrichedPoint[]>(() => {
     if (!data.length) return [];
-
-    const closes = data.map((d) => d.close);
-    const highs = data.map((d) => d.high);
-    const lows = data.map((d) => d.low);
+    const sourceData = calculationData?.length ? calculationData : data;
+    const closes = sourceData.map((d) => d.close);
+    const highs = sourceData.map((d) => d.high);
+    const lows = sourceData.map((d) => d.low);
 
     const bb = indicators.bollinger ? calculateBollingerBands(closes) : null;
     const stoch = indicators.stochastic ? calculateStochastic(highs, lows, closes) : null;
     const macd = indicators.macd ? calculateMACD(closes) : null;
     const adx = indicators.adx ? calculateADX(highs, lows, closes) : null;
     const sd = indicators.stdDev ? calculateRollingStdDev(closes) : null;
-    const ichi = indicators.ichimoku && data.length >= MIN_BARS.ichimoku
+    const ichi = indicators.ichimoku && sourceData.length >= MIN_BARS.ichimoku
       ? calculateIchimoku(highs, lows, closes) : null;
 
-    const result: EnrichedPoint[] = data.map((point, i) => {
+    const result: EnrichedPoint[] = sourceData.map((point, i) => {
       const e: EnrichedPoint = { ...point };
       if (bb) { e.bbUpper = bb[i].upper; e.bbMiddle = bb[i].middle; e.bbLower = bb[i].lower; }
       if (stoch) { e.stochK = stoch[i].k; e.stochD = stoch[i].d; }
@@ -1064,14 +868,14 @@ export function StockChart({
 
     // Future-projected Ichimoku cloud
     if (ichi) {
-      const lastDate = data[data.length - 1]?.date;
+      const lastDate = sourceData[sourceData.length - 1]?.date;
       for (let f = 0; f < 26; f++) {
-        const idx = data.length + f;
+        const idx = sourceData.length + f;
         if (idx >= ichi.length) break;
         const pt = ichi[idx];
         if (pt.senkouA === undefined && pt.senkouB === undefined) continue;
         const futureDate = lastDate
-          ? (() => { const d = new Date(lastDate + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + f + 1); return d.toISOString().split("T")[0]; })()
+          ? (() => { const d = new Date(lastDate.length <= 10 ? lastDate + "T00:00:00Z" : lastDate); d.setUTCDate(d.getUTCDate() + f + 1); return d.toISOString(); })()
           : `future-${f}`;
         result.push({
           date: futureDate, open: 0, high: 0, low: 0, close: 0, volume: 0,
@@ -1079,8 +883,9 @@ export function StockChart({
         });
       }
     }
-    return result;
-  }, [data, indicators.bollinger, indicators.stochastic, indicators.macd, indicators.adx, indicators.stdDev, indicators.ichimoku]);
+    const visibleDates = new Set(data.map((point) => point.date));
+    return result.filter((point) => point._ichimokuFuture || visibleDates.has(point.date));
+  }, [data, calculationData, indicators.bollinger, indicators.stochastic, indicators.macd, indicators.adx, indicators.stdDev, indicators.ichimoku]);
 
   // ─── Fibonacci levels ───────────────────────────────────────────────────
   const fibData = useMemo(() => {
@@ -1230,7 +1035,7 @@ export function StockChart({
               )}
             </div>
             <div className="flex flex-wrap gap-1.5">
-              <TogglePill active={indicators.bollinger} onClick={() => toggle("bollinger")} disabled={data.length < MIN_BARS.bollinger} color="#06b6d4">
+              <TogglePill active={indicators.bollinger} onClick={() => toggle("bollinger")} disabled={indicatorBarCount < MIN_BARS.bollinger} color="#06b6d4">
                 Bollinger
               </TogglePill>
               <TogglePill active={indicators.fibRetracement} onClick={() => toggle("fibRetracement")} disabled={data.length < MIN_BARS.fibRetracement} color={FIB_RET_COLOR}>
@@ -1239,7 +1044,7 @@ export function StockChart({
               <TogglePill active={indicators.fibExtension} onClick={() => toggle("fibExtension")} disabled={data.length < MIN_BARS.fibExtension} color={FIB_EXT_COLOR}>
                 Fib Extension
               </TogglePill>
-              <TogglePill active={indicators.ichimoku} onClick={() => toggle("ichimoku")} disabled={data.length < MIN_BARS.ichimoku} color={ICHIMOKU_COLORS.tenkan}>
+              <TogglePill active={indicators.ichimoku} onClick={() => toggle("ichimoku")} disabled={indicatorBarCount < MIN_BARS.ichimoku} color={ICHIMOKU_COLORS.tenkan}>
                 Ichimoku
               </TogglePill>
               <TogglePill
@@ -1296,16 +1101,16 @@ export function StockChart({
               )}
             </div>
             <div className="flex flex-wrap gap-1.5">
-              <TogglePill active={indicators.stochastic} onClick={() => toggle("stochastic")} disabled={data.length < MIN_BARS.stochastic} color={STOCH_COLORS.k}>
+              <TogglePill active={indicators.stochastic} onClick={() => toggle("stochastic")} disabled={indicatorBarCount < MIN_BARS.stochastic} color={STOCH_COLORS.k}>
                 Stochastic
               </TogglePill>
-              <TogglePill active={indicators.macd} onClick={() => toggle("macd")} disabled={data.length < MIN_BARS.macd} color={MACD_COLORS.macd}>
+              <TogglePill active={indicators.macd} onClick={() => toggle("macd")} disabled={indicatorBarCount < MIN_BARS.macd} color={MACD_COLORS.macd}>
                 MACD
               </TogglePill>
-              <TogglePill active={indicators.adx} onClick={() => toggle("adx")} disabled={data.length < MIN_BARS.adx} color={ADX_COLORS.adx}>
+              <TogglePill active={indicators.adx} onClick={() => toggle("adx")} disabled={indicatorBarCount < MIN_BARS.adx} color={ADX_COLORS.adx}>
                 ADX
               </TogglePill>
-              <TogglePill active={indicators.stdDev} onClick={() => toggle("stdDev")} disabled={data.length < MIN_BARS.stdDev} color={STDDEV_COLOR}>
+              <TogglePill active={indicators.stdDev} onClick={() => toggle("stdDev")} disabled={indicatorBarCount < MIN_BARS.stdDev} color={STDDEV_COLOR}>
                 Std Dev
               </TogglePill>
             </div>
@@ -1324,142 +1129,6 @@ export function StockChart({
             </div>
           </div>
 
-          {/* ── AI Setup Analysis ──────────────────────────────────────── */}
-          {symbol && (
-            <div className="border-t border-white/[0.06] pt-4">
-              <div className="flex items-center gap-1.5 mb-2.5">
-                <Sparkles className="h-3.5 w-3.5 text-accent/70" />
-                <span className="text-[10px] font-bold uppercase tracking-widest text-neutral/60">
-                  {locale === "zh" ? "指标解读" : "Setup Interpretation"}
-                </span>
-              </div>
-
-              <button
-                onClick={analyzeSetup}
-                disabled={setupLoading || !data.length}
-                className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold transition-all border ${
-                  setupLoading
-                    ? "border-accent/30 bg-accent/10 text-accent cursor-wait"
-                    : "border-accent/30 bg-accent/10 text-accent hover:bg-accent/20 hover:border-accent/50"
-                }`}
-              >
-                {setupLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-                {setupLoading
-                  ? (locale === "zh" ? "分析中…" : "Analyzing…")
-                  : setupAnalysis
-                  ? (locale === "zh" ? "重新解读" : "Re-analyze Setup")
-                  : (locale === "zh" ? "解读当前指标" : "Analyze Current Setup")}
-              </button>
-
-              {activeCount > 0 && !setupAnalysis && !setupLoading && (
-                <p className="mt-1.5 text-[10px] text-neutral/40">
-                  {locale === "zh"
-                    ? `将解读 ${range.toUpperCase()} / ${interval} 图表上已启用的 ${activeCount} 个指标`
-                    : `Analyzes ${activeCount} active indicator${activeCount > 1 ? "s" : ""} on the ${range.toUpperCase()} / ${interval} chart`}
-                </p>
-              )}
-
-              {setupError && (
-                <div className="mt-2 rounded-lg border border-bear/30 bg-bear/10 p-2 text-xs text-bear">
-                  {setupError}
-                </div>
-              )}
-
-              {setupAnalysis && !setupLoading && (
-                <div className="mt-3 space-y-2.5">
-                  {/* Source banner */}
-                  <div className="flex items-center justify-between rounded-lg border border-surface-border bg-surface-elevated/40 px-3 py-2">
-                    <div className="flex items-center gap-2">
-                      <span className="inline-flex items-center rounded-full bg-accent/10 px-2 py-0.5 text-[11px] font-bold text-accent">
-                        {setupAnalysis.source !== "fallback" ? "AI" : locale === "zh" ? "规则回退" : "Rule-based"}
-                      </span>
-                      <span className="text-[10px] text-neutral/60">
-                        {setupAnalysis.indicatorsUsed.length} {locale === "zh" ? `个指标` : `indicator${setupAnalysis.indicatorsUsed.length !== 1 ? "s" : ""}`}
-                      </span>
-                    </div>
-                    <span className="text-[10px] text-neutral/40 capitalize">
-                      {setupAnalysis.context.chartType === "candle"
-                        ? (locale === "zh" ? "蜡烛图" : "Candle Chart")
-                        : (locale === "zh" ? "折线图" : "Line Chart")}
-                    </span>
-                  </div>
-
-                  {/* Summary */}
-                  {setupAnalysis.summary && (
-                    <p className="text-xs leading-relaxed text-slate-300">{setupAnalysis.summary}</p>
-                  )}
-
-                  {/* Interpretations */}
-                  {setupAnalysis.interpretations.length > 0 && (
-                    <div className="rounded-lg border border-accent/15 bg-accent/5 p-2.5">
-                      <div className="mb-1.5 flex items-center gap-1 text-[10px] font-bold uppercase text-accent/80">
-                        <Eye className="h-3 w-3" /> {locale === "zh" ? "指标在说什么" : "Indicator Read"}
-                      </div>
-                      <ul className="space-y-1">
-                        {setupAnalysis.interpretations.map((item, i) => (
-                          <li key={i} className="flex gap-1.5 text-[11px] leading-relaxed text-slate-300">
-                            <span className="mt-1 h-1 w-1 shrink-0 rounded-full bg-accent/70" />
-                            {item}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-
-                  {/* Caveats */}
-                  {setupAnalysis.caveats.length > 0 && (
-                    <div className="rounded-lg border border-amber-500/15 bg-amber-500/5 p-2.5">
-                      <div className="mb-1.5 flex items-center gap-1 text-[10px] font-bold uppercase text-amber-400">
-                        <AlertTriangle className="h-3 w-3" /> {locale === "zh" ? "补充说明" : "Notes"}
-                      </div>
-                      <ul className="space-y-1">
-                        {setupAnalysis.caveats.map((item, i) => (
-                          <li key={i} className="flex gap-1.5 text-[11px] leading-relaxed text-slate-400">
-                            <span className="mt-1 h-1 w-1 shrink-0 rounded-full bg-amber-400" />
-                            {item}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-
-                  {/* Context & Trust Footer */}
-                  <div className="space-y-1.5 rounded-lg bg-surface-elevated/20 px-2.5 py-2">
-                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[9px] text-neutral/50">
-                      <span className="font-semibold text-neutral/60">
-                        {setupAnalysis.context.range.toUpperCase()} / {setupAnalysis.context.interval}
-                      </span>
-                      <span className="text-neutral/30">·</span>
-                      <span>
-                        {setupAnalysis.indicatorsUsed.length} {locale === "zh" ? `个指标` : `indicator${setupAnalysis.indicatorsUsed.length !== 1 ? "s" : ""}`}
-                      </span>
-                      <span className="text-neutral/30">·</span>
-                      <span className={setupAnalysis.hasMacroContext ? "text-accent/60" : "text-neutral/35"}>
-                        {locale === "zh"
-                          ? `宏观：${setupAnalysis.hasMacroContext ? "已纳入" : "未纳入"}`
-                          : `Macro: ${setupAnalysis.hasMacroContext ? "included" : "not included"}`}
-                      </span>
-                      <span className="text-neutral/30">·</span>
-                      <span>
-                        {(setupAnalysis.source !== "fallback" ? "AI" : locale === "zh" ? "规则回退" : "Rule-based")} · {(() => {
-                          try {
-                            return formatDistanceToNow(parseISO(setupAnalysis.generatedAt), {
-                              addSuffix: true,
-                              locale: locale === "zh" ? zhCN : undefined,
-                            });
-                          }
-                          catch { return locale === "zh" ? "刚刚" : "just now"; }
-                        })()}
-                      </span>
-                    </div>
-                    <p className="text-[8px] text-neutral/30">
-                      {locale === "zh" ? "AI 生成的指标解读，仅供参考，不构成投资建议" : "AI-generated interpretation — not financial advice"}
-                    </p>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
         </div>
       )}
     </div>
@@ -1489,7 +1158,7 @@ export function StockChart({
           <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-neutral">Interval</span>
           <div className="flex items-center gap-0.5">
             {INTERVALS.map(({ label, value }) => {
-              const dis = value === "1h" && !intradaySupported;
+              const dis = ["1m", "5m", "15m", "1h", "4h"].includes(value) && !intradaySupported;
               return (
                 <button key={value} onClick={() => !dis && handleInterval(value)} disabled={dis}
                   title={dis ? "Intraday data not available" : undefined}
@@ -1512,6 +1181,19 @@ export function StockChart({
             ))}
           </div>
         </div>
+        {drawings.length > 0 && (
+          <div className="ml-auto flex items-center gap-2 self-end">
+            <span className="inline-flex items-center gap-1.5 rounded-md border border-sky-400/20 bg-sky-400/10 px-2.5 py-1.5 text-[10px] font-semibold text-sky-300">
+              <PenLine className="h-3.5 w-3.5" />Model drawings {drawings.length}
+            </span>
+            {onClearDrawings && (
+              <button onClick={onClearDrawings} title="Clear model drawings"
+                className="inline-flex items-center gap-1 rounded-md border border-surface-border px-2 py-1.5 text-[10px] text-neutral hover:border-red-500/30 hover:text-red-400">
+                <Trash2 className="h-3 w-3" />Clear
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Active indicator legend — compact, only shows what's currently on */}
@@ -1531,6 +1213,7 @@ export function StockChart({
           </>
         )}
         {indicators.pitchfork && anchors.length === MAX_PITCHFORK_ANCHORS && <Swatch color={PITCHFORK_COLOR} label="Andrews' Pitchfork" />}
+        {drawings.length > 0 && <Swatch color="#38bdf8" label={`Model layer (${drawings.length})`} />}
         {indicators.logScale && (
           <span className="flex items-center gap-1 text-purple-400/70">
             <span className="h-1.5 w-1.5 rounded-full bg-purple-500" />Log
@@ -1719,7 +1402,7 @@ export function StockChart({
             )}
 
             {/* Ichimoku lines */}
-            {indicators.ichimoku && data.length >= MIN_BARS.ichimoku && (
+            {indicators.ichimoku && indicatorBarCount >= MIN_BARS.ichimoku && (
               <>
                 <Line type="monotone" dataKey="tenkan" name="Tenkan" stroke={ICHIMOKU_COLORS.tenkan}
                   strokeWidth={1} strokeOpacity={overlayOpacity} dot={false} connectNulls isAnimationActive={false} />
@@ -1810,6 +1493,14 @@ export function StockChart({
             <Line type="monotone" dataKey="ma20" name="MA20" stroke={MA_COLORS.ma20} strokeWidth={1.3} dot={false} strokeDasharray="4 2" connectNulls />
             <Line type="monotone" dataKey="ma50" name="MA50" stroke={MA_COLORS.ma50} strokeWidth={1.3} dot={false} connectNulls />
             <Line type="monotone" dataKey="ma200" name="MA200" stroke={MA_COLORS.ma200} strokeWidth={1.3} dot={false} connectNulls />
+
+            {/* Provider-neutral drawing commands emitted by any analysis model */}
+            {drawings.length > 0 && (
+              <Customized
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                component={(chartProps: any) => <ModelDrawingLayer drawings={drawings} data={data} chartProps={chartProps} />}
+              />
+            )}
 
             {/* Anchor dots */}
             {anchors.map((a, i) => (
@@ -1939,8 +1630,8 @@ export function StockChart({
       {indicators.stochastic && (
         <OscPane title="Stochastic (14, 3)" accentColor={STOCH_COLORS.k}
           subtitle={<><span style={{ color: STOCH_COLORS.k }}>%K</span>{" "}<span style={{ color: STOCH_COLORS.d }}>%D</span></>}>
-          {data.length < MIN_BARS.stochastic ? (
-            <div style={{ height: oscH }}><InsufficientNotice name="Stochastic" needed={MIN_BARS.stochastic} have={data.length} /></div>
+          {indicatorBarCount < MIN_BARS.stochastic ? (
+            <div style={{ height: oscH }}><InsufficientNotice name="Stochastic" needed={MIN_BARS.stochastic} have={indicatorBarCount} /></div>
           ) : (
             <ResponsiveContainer width="100%" height={oscH}>
               <ComposedChart data={enriched} margin={oscMargin}>
@@ -1964,8 +1655,8 @@ export function StockChart({
       {indicators.macd && (
         <OscPane title="MACD (12, 26, 9)" accentColor={MACD_COLORS.macd}
           subtitle={<><span style={{ color: MACD_COLORS.macd }}>MACD</span>{" "}<span style={{ color: MACD_COLORS.signal }}>Signal</span>{" "}<span className="text-neutral/30">Hist</span></>}>
-          {data.length < MIN_BARS.macd ? (
-            <div style={{ height: oscH }}><InsufficientNotice name="MACD" needed={MIN_BARS.macd} have={data.length} /></div>
+          {indicatorBarCount < MIN_BARS.macd ? (
+            <div style={{ height: oscH }}><InsufficientNotice name="MACD" needed={MIN_BARS.macd} have={indicatorBarCount} /></div>
           ) : (
             <ResponsiveContainer width="100%" height={oscH}>
               <ComposedChart data={enriched} margin={oscMargin}>
@@ -1991,8 +1682,8 @@ export function StockChart({
       {indicators.adx && (
         <OscPane title="ADX (14)" accentColor={ADX_COLORS.adx}
           subtitle={<><span style={{ color: ADX_COLORS.adx }}>ADX</span>{" "}<span style={{ color: ADX_COLORS.plusDI }}>+DI</span>{" "}<span style={{ color: ADX_COLORS.minusDI }}>&minus;DI</span></>}>
-          {data.length < MIN_BARS.adx ? (
-            <div style={{ height: oscH }}><InsufficientNotice name="ADX" needed={MIN_BARS.adx} have={data.length} /></div>
+          {indicatorBarCount < MIN_BARS.adx ? (
+            <div style={{ height: oscH }}><InsufficientNotice name="ADX" needed={MIN_BARS.adx} have={indicatorBarCount} /></div>
           ) : (
             <ResponsiveContainer width="100%" height={oscH}>
               <ComposedChart data={enriched} margin={oscMargin}>
@@ -2015,8 +1706,8 @@ export function StockChart({
       {indicators.stdDev && (
         <OscPane title="Std Deviation (20)" accentColor={STDDEV_COLOR}
           subtitle={<span className="text-neutral/30">rolling close-to-close % vol</span>}>
-          {data.length < MIN_BARS.stdDev ? (
-            <div style={{ height: oscH }}><InsufficientNotice name="Std Dev" needed={MIN_BARS.stdDev} have={data.length} /></div>
+          {indicatorBarCount < MIN_BARS.stdDev ? (
+            <div style={{ height: oscH }}><InsufficientNotice name="Std Dev" needed={MIN_BARS.stdDev} have={indicatorBarCount} /></div>
           ) : (
             <ResponsiveContainer width="100%" height={oscH}>
               <ComposedChart data={enriched} margin={oscMargin}>

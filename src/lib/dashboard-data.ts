@@ -1,6 +1,6 @@
 import { cache, TTL } from "@/lib/cache";
 import { normalizeWatchlistEntry } from "@/lib/assets";
-import type { AppAiProvider, DashboardMarket } from "@/lib/app-settings";
+import type { DashboardMarket } from "@/lib/app-settings";
 import { getWatchlistSymbols } from "@/lib/refresh";
 import {
   loadFearGreed,
@@ -159,8 +159,8 @@ export function getInitialFearGreedPayload(): FearGreedPayload {
   };
 }
 
-export function getInitialMacroViewPayload(provider: AppAiProvider = "gemini"): MacroViewPayload {
-  const cacheKey = `macro:view:${provider}`;
+export function getInitialMacroViewPayload(): MacroViewPayload {
+  const cacheKey = "macro:view:rules";
   const cached = cache.get<MacroView>(cacheKey);
   if (cached) {
     return {
@@ -172,7 +172,7 @@ export function getInitialMacroViewPayload(provider: AppAiProvider = "gemini"): 
     };
   }
 
-  const stored = loadMacroView(provider);
+  const stored = loadMacroView();
   if (stored) {
     return {
       data: stored.data,
@@ -209,5 +209,5 @@ export function warmDashboardCaches(): void {
   if (fearGreed) cache.set("fear-greed", fearGreed.data, TTL.FEAR_GREED);
 
   const macroView = loadMacroView();
-  if (macroView) cache.set("macro:view:gemini", macroView.data, TTL.MACRO_VIEW);
+  if (macroView) cache.set("macro:view:rules", macroView.data, TTL.MACRO_VIEW);
 }

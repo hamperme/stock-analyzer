@@ -1,5 +1,3 @@
-import type { AppAiProvider } from "./app-settings";
-
 // ─── Market Data ──────────────────────────────────────────────────────────────
 
 export type AssetType = "stock" | "crypto";
@@ -37,6 +35,128 @@ export interface ChartDataPoint extends HistoricalBar {
   ma20?: number;
   ma50?: number;
   ma200?: number;
+}
+
+// ─── Model-driven chart drawings ────────────────────────────────────────────
+
+export type ChartDrawingKind =
+  | "trendline"
+  | "ray"
+  | "horizontal"
+  | "vertical"
+  | "channel"
+  | "rectangle"
+  | "arrow"
+  | "polyline"
+  | "label";
+
+export interface ChartDrawingPoint {
+  /** ISO timestamp/date matching a candle, or a time close to one. */
+  date: string;
+  price: number;
+}
+
+export interface ChartDrawingStyle {
+  color?: string;
+  width?: number;
+  opacity?: number;
+  dash?: string;
+  fill?: string;
+  fillOpacity?: number;
+}
+
+/** Provider-neutral command that any future analysis model can emit. */
+export interface ChartDrawing {
+  id: string;
+  kind: ChartDrawingKind;
+  points: ChartDrawingPoint[];
+  label?: string;
+  style?: ChartDrawingStyle;
+  extendLeft?: boolean;
+  extendRight?: boolean;
+  visible?: boolean;
+  createdBy?: "user" | "model";
+  metadata?: Record<string, string | number | boolean | null>;
+}
+
+// ─── Crypto derivatives market data ───
+
+export interface DerivativesPoint {
+  time: number;
+  value: number;
+}
+
+export interface DerivativesSnapshot {
+  symbol: string;
+  exchangeSymbol: string;
+  markPrice: number;
+  indexPrice: number;
+  basisPct: number;
+  fundingRate: number;
+  fundingAnnualizedPct: number;
+  nextFundingTime: number;
+  openInterest: number;
+  openInterestUsd: number;
+  openInterestChange24hPct: number | null;
+  longAccountPct: number | null;
+  shortAccountPct: number | null;
+  longShortRatio: number | null;
+  takerBuySellRatio: number | null;
+  oiHistory: DerivativesPoint[];
+  fundingHistory: DerivativesPoint[];
+  updatedAt: string;
+  source: "binance-usdm";
+}
+
+export interface UnusualOption {
+  contract: string;
+  type: "call" | "put";
+  strike: number;
+  expiry: string;
+  volume: number;
+  openInterest: number;
+  volumeOiRatio: number;
+  impliedVolatilityPct: number;
+}
+
+export interface OptionStrikeProfile {
+  strike: number;
+  callOpenInterest: number;
+  putOpenInterest: number;
+  netGamma: number;
+}
+
+export interface OptionExpiryAnalytics {
+  expiry: string;
+  daysToExpiry: number;
+  callOpenInterest: number;
+  putOpenInterest: number;
+  putCallRatio: number;
+  maxPain: number | null;
+  callWall: number | null;
+  putWall: number | null;
+  gammaFlipEstimate: number | null;
+  strikes: OptionStrikeProfile[];
+}
+
+export interface OptionsSnapshot {
+  symbol: string;
+  underlyingPrice: number;
+  iv30Pct: number;
+  expectedMove30d: number;
+  callOpenInterest: number;
+  putOpenInterest: number;
+  putCallOiRatio: number;
+  callVolume: number;
+  putVolume: number;
+  putCallVolumeRatio: number;
+  gammaExposure: number;
+  maxPain: number | null;
+  nearestExpiry: string | null;
+  unusualContracts: UnusualOption[];
+  expiries: OptionExpiryAnalytics[];
+  updatedAt: string;
+  source: "cboe-delayed";
 }
 
 // ─── Technical Analysis ───────────────────────────────────────────────────────
@@ -126,171 +246,6 @@ export interface NewsItem {
   sentiment: "positive" | "negative" | "neutral";
 }
 
-// ─── AI Analysis ──────────────────────────────────────────────────────────────
-
-export type AIRecommendation = "Strong Buy" | "Buy" | "Neutral" | "Sell" | "Strong Sell";
-export type AIConfidence = "High" | "Medium" | "Low";
-
-export interface AIAnalysis {
-  bullCase: string[];
-  bearCase: string[];
-  risks: string[];
-  recommendation: AIRecommendation;
-  confidence: AIConfidence;
-  summary: string;
-  targetEntry?: string;
-  stopLoss?: string;
-  generatedAt: string;
-  locale?: "en" | "zh";
-  source?: AppAiProvider | "fallback";
-}
-
-// ─── Setup Analysis (chart-context AI interpretation) ────────────────────────
-
-/** The structured payload sent from the chart to the setup-analysis endpoint */
-export interface SetupAnalysisInput {
-  symbol: string;
-  assetType?: AssetType;
-  locale?: "en" | "zh";
-  provider?: AppAiProvider;
-  price: number;
-  range: string;
-  interval: string;
-  chartType: "line" | "candle";
-  /** Only the indicators the user has actually enabled */
-  activeIndicators: ActiveIndicatorSnapshot[];
-  /** Structured macro regime context — null when unavailable */
-  macroContext: MacroContextPayload | null;
-}
-
-/**
- * Concise structured macro context for the setup-analysis AI.
- * Extracted from the full MacroView + MacroSnapshot — only the fields
- * the setup interpreter actually needs.
- */
-export interface MacroContextPayload {
-  regime: MarketRegime;
-  confidence: "High" | "Medium" | "Low";
-  confidenceScore: number;
-  isStale: boolean;
-  /** Top 2–3 bullish macro drivers */
-  bullDrivers: string[];
-  /** Top 2–3 bearish macro drivers */
-  bearDrivers: string[];
-  /** 1–2 items to watch next */
-  watchNext: string[];
-  /** Short neutral-tone summary */
-  summary: string;
-  /** Policy path bias if available */
-  policyBias: "Dovish" | "Neutral" | "Hawkish" | null;
-  /** VIX level and regime label */
-  volatility: { vix: number; regime: "low" | "elevated" | "high" | "extreme" } | null;
-  /** Breadth assessment if available */
-  breadth: "Broad" | "Healthy" | "Narrow" | "Very Narrow" | null;
-  /** Fear & Greed score if available */
-  fearGreed: { score: number; label: string } | null;
-}
-
-/** A single active indicator's current state */
-export interface ActiveIndicatorSnapshot {
-  name: string;
-  /** Human-readable state summary, e.g. "K: 78, D: 65 — overbought" */
-  state: string;
-  /** Machine-readable structured fields for richer AI analysis */
-  structured?: IndicatorStructuredData;
-}
-
-/** Typed structured data per indicator — only the relevant sub-object is populated */
-export interface IndicatorStructuredData {
-  bollinger?: {
-    upper: number;
-    middle: number;
-    lower: number;
-    bandwidth: number;
-    /** 0–100: where price sits within the band (0 = at lower, 100 = at upper) */
-    percentB: number;
-  };
-  stochastic?: {
-    k: number;
-    d: number;
-    zone: "overbought" | "oversold" | "neutral";
-    crossover: "bullish" | "bearish" | "none";
-  };
-  macd?: {
-    macd: number;
-    signal: number;
-    histogram: number;
-    histogramSign: "positive" | "negative" | "zero";
-    crossover: "bullish" | "bearish" | "none";
-  };
-  adx?: {
-    adx: number;
-    plusDI: number;
-    minusDI: number;
-    trendStrength: "strong" | "trending" | "weak" | "none";
-    direction: "bullish" | "bearish";
-  };
-  ichimoku?: {
-    tenkanAboveKijun: boolean | null;
-    priceVsCloud: "above" | "below" | "inside";
-    cloudColor: "green" | "red" | null;
-  };
-  movingAverages?: {
-    ma20: number;
-    ma50: number | null;
-    ma200: number | null;
-    alignment: "bullish" | "bearish" | "mixed";
-  };
-  fibRetracement?: {
-    nearestLevel: number;
-    nearestPrice: number;
-    priceDistance: number;
-  };
-  fibExtension?: {
-    nearestLevel: number;
-    nearestPrice: number;
-    priceDistance: number;
-  };
-  stdDev?: {
-    value: number;
-    percentOfPrice: number;
-  };
-  pitchfork?: {
-    /** Where price sits relative to the 5 pitchfork lines */
-    priceVsMedian: "above" | "below" | "near";
-    priceVsUpperTine: "above" | "below" | "near";
-    priceVsLowerTine: "above" | "below" | "near";
-    priceVsUpperWarning: "above" | "below" | "near";
-    priceVsLowerWarning: "above" | "below" | "near";
-    /** Distance from price to each line as % of tine-to-tine width */
-    distFromMedianPct: number;
-    /** Qualitative position within the fork geometry */
-    position: "above-upper-warning" | "upper-warning-zone" | "upper-half" | "near-median" | "lower-half" | "lower-warning-zone" | "below-lower-warning";
-    /** Whether price appears to be reverting toward median */
-    reverting: boolean;
-    /** Anchor metadata */
-    anchors: { a1: number; a2: number; a3: number };
-    /** Median line slope direction */
-    medianSlope: "rising" | "falling" | "flat";
-  };
-}
-
-/** The AI-generated setup interpretation */
-export interface SetupAnalysis {
-  summary: string;
-  interpretations: string[];
-  caveats: string[];
-  generatedAt: string;
-  source: AppAiProvider | "fallback";
-  fallbackReason?: "missing_key" | "generation_failed";
-  /** Which indicators were analysed */
-  indicatorsUsed: string[];
-  /** Chart context this was generated for */
-  context: { symbol: string; range: string; interval: string; chartType: string };
-  /** Whether macro regime context was included in the analysis */
-  hasMacroContext: boolean;
-}
-
 // ─── Macro Market View ───────────────────────────────────────────────────────
 
 export type MarketRegime = "Risk-On" | "Cautious" | "Risk-Off" | "Mixed";
@@ -346,7 +301,7 @@ export interface BreadthReading {
 
 // ── Confidence / transparency ───────────────────────────────────────────────
 
-/** Computed confidence metadata — deterministic, not AI-generated */
+/** Deterministically computed confidence metadata. */
 export interface ConfidenceMeta {
   level: "High" | "Medium" | "Low";
   /** 0–100 composite score based on input coverage + signal quality */
@@ -439,10 +394,10 @@ export interface MacroView {
   /** Actionable items to monitor */
   watchItems: string[];
   regime: MarketRegime;
-  /** Deterministically computed confidence — not AI-generated */
+  /** Deterministically computed confidence */
   confidence: ConfidenceMeta;
   generatedAt: string;
-  source: AppAiProvider | "fallback";
+  source: "rules";
   /** Human-readable data inputs that fed the synthesis */
   dataSources: string[];
   /** The structured snapshot that produced this view */

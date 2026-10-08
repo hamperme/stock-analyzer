@@ -6,7 +6,6 @@ import {
   TrendingDown,
   Shield,
   AlertTriangle,
-  Sparkles,
   RefreshCw,
   ChevronDown,
   ChevronUp,
@@ -145,7 +144,7 @@ export function MacroViewPanel({
   initialError,
   initialLastUpdated,
 }: MacroViewPanelProps) {
-  const { dict, aiProvider } = useSettings();
+  const { dict } = useSettings();
   const [data, setData] = useState<MacroView | null>(initialData ?? null);
   const [loading, setLoading] = useState(
     initialData === undefined && initialError === undefined && initialLastUpdated === undefined
@@ -158,7 +157,7 @@ export function MacroViewPanel({
 
   const fetchData = useCallback(async () => {
     try {
-      const res = await fetch(`/api/macro-view?provider=${aiProvider}`);
+      const res = await fetch(`/api/macro-view`);
       const json = await res.json();
       if (json.error) throw new Error(json.error);
       setData(json.data);
@@ -169,7 +168,7 @@ export function MacroViewPanel({
     } finally {
       setLoading(false);
     }
-  }, [aiProvider]);
+  }, []);
 
   useEffect(() => {
     fetchData();
@@ -197,7 +196,6 @@ export function MacroViewPanel({
 
   const regime = regimeConfig[data.regime] ?? regimeConfig["Mixed"];
   const RegimeIcon = regime.icon;
-  const isAI = data.source !== "fallback";
   const translatedRegime = dict.macro.regimes[data.regime] ?? data.regime;
   const snap: MacroSnapshot | null = data.snapshot ?? null;
   const conf: ConfidenceMeta = data.confidence && typeof data.confidence === "object"
@@ -221,16 +219,9 @@ export function MacroViewPanel({
           <h3 className="text-sm font-semibold uppercase tracking-wider text-neutral">
             {dict.macro.title}
           </h3>
-          {isAI ? (
-            <span className="flex items-center gap-1 rounded-full bg-indigo-500/15 px-2 py-0.5 text-[10px] font-medium text-indigo-400 border border-indigo-500/30 shrink-0">
-              <Sparkles className="h-3 w-3" />
-              {dict.macro.aiSynthesized}
-            </span>
-          ) : (
-            <span className="rounded-full bg-slate-500/15 px-2 py-0.5 text-[10px] font-medium text-slate-500 border border-slate-500/30 shrink-0">
-              {dict.macro.ruleBased}
-            </span>
-          )}
+          <span className="rounded-full bg-slate-500/15 px-2 py-0.5 text-[10px] font-medium text-slate-500 border border-slate-500/30 shrink-0">
+            {dict.macro.ruleBased}
+          </span>
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <span className={`flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-semibold ${regime.color} ${regime.bg} border ${regime.border}`}>

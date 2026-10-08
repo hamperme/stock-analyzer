@@ -6,7 +6,6 @@ import { BarChart2 } from "lucide-react";
 import { SettingsButton } from "@/components/app/SettingsButton";
 import { SettingsProvider } from "@/components/app/SettingsProvider";
 import { readAppSettings } from "@/lib/app-settings";
-import { getAiProviderLabel, getAvailableAiProviders } from "@/lib/ai-provider-server";
 import { getDictionary } from "@/lib/i18n";
 import "./globals.css";
 
@@ -14,7 +13,7 @@ const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
   title: "StockPulse — Market Analyzer",
-  description: "Real-time stock and crypto analysis with AI-powered insights, technical indicators, and market sentiment.",
+  description: "Real-time stock and crypto analysis with technical indicators and market sentiment.",
   keywords: ["stock analyzer", "crypto analyzer", "technical analysis", "RSI", "moving averages", "fear and greed"],
 };
 
@@ -59,15 +58,9 @@ export default function RootLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const availableAiProviders = getAvailableAiProviders();
-  const { locale, theme, aiProvider, market } = readAppSettings(cookies(), availableAiProviders);
+  const { locale, theme, market } = readAppSettings(cookies());
   const dict = getDictionary(locale);
-  const aiTagLabel = availableAiProviders.length > 0
-    ? getAiProviderLabel(aiProvider)
-    : locale === "zh"
-    ? "规则回退"
-    : "Rule-Based Fallback";
-  const marketTagline = dict.layout.marketTagline(aiTagLabel);
+  const marketTagline = dict.layout.marketTagline();
 
   return (
     <html lang={locale} className={theme}>
@@ -75,9 +68,7 @@ export default function RootLayout({
         <SettingsProvider
           initialLocale={locale}
           initialTheme={theme}
-          initialAiProvider={aiProvider}
           initialMarket={market}
-          initialAvailableAiProviders={availableAiProviders}
         >
           <Navbar marketTagline={marketTagline} />
           <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">

@@ -61,14 +61,20 @@ export interface RefreshResult {
 async function ensureYahooReady(): Promise<void> {
   const status = getCircuitBreakerStatus();
   if (!status.v8Blocked && !status.sparkBlocked) return;
+  // Keep the breaker open. Yahoo helpers immediately fall back to curl, while
+  // resetting here would repeatedly retry the TLS fingerprint that just 429'd.
+  console.log("[refresh] Yahoo native transport blocked; using fallback transport");
+}
 
-  // If breakers are active, the block is ≤60s. Just reset them — the inter-symbol
-  // delay already gives Yahoo time to recover, and we don't want a single symbol's
-  // 429 to doom all subsequent symbols.
-  console.log("[refresh] Resetting Yahoo circuit breakers before next history fetch");
-  resetYahooCBs();
-  // Small additional pause to let Yahoo cool down
-  await sleep(3000);
+async function mapLimited<T>(items: T[], concurrency: number, task: (item: T) => Promise<void>): Promise<void> {
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (cursor < items.length) {
+      const item = items[cursor++];
+      await task(item);
+    }
+  });
+  await Promise.all(workers);
 }
 
 /**
@@ -276,6 +282,42 @@ export function rebuildWatchlistSnapshot(symbols = getWatchlistSymbols()): Watch
 }
 
 /**
+ * Refresh only the most recent daily candles and merge them into the long-term
+ * snapshot. This is intentionally cheap enough for an open asset page to call
+ * every few minutes, unlike the full 5-year batch refresh.
+ */
+export async function refreshRecentHistory(symbol: string): Promise<{
+  bars: HistoricalBar[];
+  source: string;
+}> {
+  const normalized = symbol.toUpperCase();
+  const existing = store.loadHistory(normalized)?.data ?? [];
+  // Reach back to the last stored bar so a long gap between refreshes is
+  // backfilled instead of leaving a hole (min 30 days, capped at 5 years).
+  // Internal holes (> 5 days between consecutive daily bars, longer than any
+  // weekend/holiday) are backfilled from their start as well.
+  const t = (d: string) => new Date(d.length <= 10 ? `${d}T00:00:00Z` : d).getTime();
+  const holeStart = existing.findIndex((b, i) => i > 0 && t(b.date) - t(existing[i - 1].date) > 5 * 86_400_000);
+  const from = holeStart > 0 ? existing[holeStart - 1].date : existing.at(-1)?.date;
+  const gapDays = from ? Math.ceil((Date.now() - t(from)) / 86_400_000) + 3 : 30;
+  const recent = await getYahooHistory(normalized, Math.min(1825, Math.max(30, gapDays)), true);
+  if (!recent.length) throw new Error(`No recent history returned for ${normalized}`);
+
+  const merged = new Map<string, HistoricalBar>();
+  for (const bar of existing) merged.set(bar.date, bar);
+  for (const bar of recent) merged.set(bar.date, bar);
+  const bars = Array.from(merged.values())
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .slice(-1827);
+
+  store.saveHistory(normalized, bars);
+  // The history API uses this shared cache. Remove the old snapshot so the
+  // just-written current candle is visible immediately.
+  cache.delete(`shared:history:${normalized}:1825`);
+  return { bars, source: "yahoo-v8-live" };
+}
+
+/**
  * Run a full refresh for all watchlist symbols.
  *
  * Phase 1: Fetch all quotes from Finnhub (fast, ≤500ms gap)
@@ -300,7 +342,7 @@ export async function runFullRefresh(
 
   // ── Phase 1: Quotes (Finnhub — fast, no heavy rate limiting) ──────────────
   console.log("[refresh] Phase 1: Fetching quotes for", symbols.length, "symbols");
-  for (const symbol of symbols) {
+  await mapLimited(symbols, 3, async (symbol) => {
     try {
       const quote = normalizeQuote(await getFinnhubQuote(symbol));
       store.saveQuote(symbol, quote);
@@ -309,19 +351,20 @@ export async function runFullRefresh(
       results[symbol].errors.push(`quote: ${(e as Error).message}`);
       totalErrors++;
     }
-    await sleep(500);
-  }
+  });
 
   // ── Phase 2: History (heavy — needs careful rate limiting) ────────────────
   if (!options.skipHistory) {
     console.log("[refresh] Phase 2: Fetching history for", symbols.length, "symbols");
 
-    // Reset Yahoo breakers at the start of the history phase
-    resetYahooCBs();
-
-    for (const symbol of symbols) {
+    await mapLimited(symbols, 2, async (symbol) => {
       try {
-        const { bars, source } = await fetchHistoryFromProviders(symbol, 1825);
+        // Existing symbols only need the latest month merged into their long
+        // snapshot. A full 5-year download is reserved for first population.
+        const existing = store.loadHistory(symbol);
+        const { bars, source } = existing?.data.length
+          ? await refreshRecentHistory(symbol)
+          : await fetchHistoryFromProviders(symbol, 1825);
         if (bars.length > 0) {
           store.saveHistory(symbol, bars);
           results[symbol].history = true;
@@ -336,20 +379,17 @@ export async function runFullRefresh(
         totalErrors++;
       }
 
-      // 3-second gap between symbols — Yahoo needs breathing room
-      // This means 10 symbols takes ~30s for history, which is fine for a batch job
-      await sleep(3000);
-    }
+    });
   } else {
-    for (const symbol of symbols) {
+    await mapLimited(symbols, 3, async (symbol) => {
       results[symbol].history = true; // skipped = OK
-    }
+    });
   }
 
   // ── Phase 3: News (Finnhub — fast) ────────────────────────────────────────
   if (!options.skipNews) {
     console.log("[refresh] Phase 3: Fetching news for", symbols.length, "symbols");
-    for (const symbol of symbols) {
+    await mapLimited(symbols, 3, async (symbol) => {
       try {
         const news = await getFinnhubNews(symbol);
         store.saveNews(symbol, news);
@@ -358,8 +398,7 @@ export async function runFullRefresh(
         results[symbol].errors.push(`news: ${(e as Error).message}`);
         totalErrors++;
       }
-      await sleep(500);
-    }
+    });
   } else {
     for (const symbol of symbols) {
       results[symbol].news = true;
