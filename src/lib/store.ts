@@ -24,13 +24,15 @@ import type {
   HistoricalBar,
   WatchlistEntry,
   NewsItem,
-  AIAnalysis,
   MarketIndex,
   MacroView,
   MacroSnapshot,
   FearGreedData,
+  DerivativesSnapshot,
+  OptionsSnapshot,
+  ChartDrawing,
 } from "./types";
-import type { AppAiProvider, DashboardMarket } from "./app-settings";
+import type { DashboardMarket } from "./app-settings";
 
 // ─── Staleness thresholds (ms) — data older than this is "stale" but still served
 export const STALE = {
@@ -38,11 +40,12 @@ export const STALE = {
   HISTORY: 12 * 60 * 60_000,  // 12 hours
   WATCHLIST: 10 * 60_000,     // 10 minutes
   NEWS: 30 * 60_000,          // 30 minutes
-  ANALYSIS: 2 * 60 * 60_000,  // 2 hours
   INDICES: 5 * 60_000,        // 5 minutes
   FEAR_GREED: 30 * 60_000,    // 30 minutes
   MACRO_SNAPSHOT: 30 * 60_000,  // 30 minutes — raw macro data
   MACRO_VIEW: 4 * 60 * 60_000, // 4 hours — synthesized view
+  DERIVATIVES: 5 * 60_000,      // 5 minutes
+  OPTIONS: 20 * 60_000,         // 20 minutes
 };
 
 // ─── Database singleton ──────────────────────────────────────────────────────
@@ -141,6 +144,38 @@ export function loadHistory(symbol: string): LoadResult<HistoricalBar[]> | null 
   return load<HistoricalBar[]>("history", symbol, STALE.HISTORY);
 }
 
+export function saveIntraday(symbol: string, interval: string, bars: HistoricalBar[]): void {
+  upsert("intraday", `${symbol}:${interval}`, bars);
+}
+
+export function loadIntraday(symbol: string, interval: string): LoadResult<HistoricalBar[]> | null {
+  return load<HistoricalBar[]>("intraday", `${symbol}:${interval}`, 5 * 60_000);
+}
+
+export function saveChartDrawings(symbol: string, interval: string, drawings: ChartDrawing[]): void {
+  upsert("chart_drawings", `${symbol.toUpperCase()}:${interval}`, drawings);
+}
+
+export function loadChartDrawings(symbol: string, interval: string): LoadResult<ChartDrawing[]> | null {
+  return load<ChartDrawing[]>("chart_drawings", `${symbol.toUpperCase()}:${interval}`, Number.MAX_SAFE_INTEGER);
+}
+
+export function saveDerivatives(symbol: string, data: DerivativesSnapshot): void {
+  upsert("derivatives", symbol, data);
+}
+
+export function loadDerivatives(symbol: string): LoadResult<DerivativesSnapshot> | null {
+  return load<DerivativesSnapshot>("derivatives", symbol, STALE.DERIVATIVES);
+}
+
+export function saveOptions(symbol: string, data: OptionsSnapshot): void {
+  upsert("options", symbol, data);
+}
+
+export function loadOptions(symbol: string): LoadResult<OptionsSnapshot> | null {
+  return load<OptionsSnapshot>("options", symbol, STALE.OPTIONS);
+}
+
 // ─── Watchlist ───────────────────────────────────────────────────────────────
 
 export function saveWatchlist(entries: WatchlistEntry[]): void {
@@ -185,38 +220,6 @@ export function loadNews(symbol: string): LoadResult<NewsItem[]> | null {
   return load<NewsItem[]>("news", symbol, STALE.NEWS);
 }
 
-// ─── Analysis ────────────────────────────────────────────────────────────────
-
-function analysisKey(
-  symbol: string,
-  locale: "en" | "zh",
-  provider: AppAiProvider
-): string {
-  return `${symbol}:${locale}:${provider}`;
-}
-
-export function saveAnalysis(
-  symbol: string,
-  analysis: AIAnalysis,
-  locale: "en" | "zh" = "en",
-  provider: AppAiProvider = "gemini"
-): void {
-  upsert("analysis", analysisKey(symbol, locale, provider), analysis);
-}
-
-export function loadAnalysis(
-  symbol: string,
-  locale: "en" | "zh" = "en",
-  provider: AppAiProvider = "gemini"
-): LoadResult<AIAnalysis> | null {
-  return (
-    load<AIAnalysis>("analysis", analysisKey(symbol, locale, provider), STALE.ANALYSIS) ??
-    (provider === "gemini" && locale === "en"
-      ? load<AIAnalysis>("analysis", symbol, STALE.ANALYSIS)
-      : null)
-  );
-}
-
 // ─── Indices ─────────────────────────────────────────────────────────────────
 
 function indicesKey(market: DashboardMarket): string {
@@ -256,21 +259,14 @@ export function loadMacroSnapshot(): LoadResult<MacroSnapshot> | null {
 
 // ─── Macro View ─────────────────────────────────────────────────────────────
 
-function macroViewKey(provider: AppAiProvider): string {
-  return `_global:${provider}`;
+export function saveMacroView(view: MacroView): void {
+  upsert("macro_view", "_global:rules", view);
 }
 
-export function saveMacroView(
-  view: MacroView,
-  provider: AppAiProvider = "gemini"
-): void {
-  upsert("macro_view", macroViewKey(provider), view);
-}
-
-export function loadMacroView(provider: AppAiProvider = "gemini"): LoadResult<MacroView> | null {
+export function loadMacroView(): LoadResult<MacroView> | null {
   return (
-    load<MacroView>("macro_view", macroViewKey(provider), STALE.MACRO_VIEW) ??
-    (provider === "gemini" ? load<MacroView>("macro_view", "_global", STALE.MACRO_VIEW) : null)
+    load<MacroView>("macro_view", "_global:rules", STALE.MACRO_VIEW) ??
+    load<MacroView>("macro_view", "_global", STALE.MACRO_VIEW)
   );
 }
 

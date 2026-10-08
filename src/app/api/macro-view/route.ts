@@ -8,7 +8,7 @@
  *   1. In-memory cache → instant return
  *   2. SQLite store → return if fresh (< 4 hours)
  *   3. Build MacroSnapshot (fetches macro instruments + gathers store data)
- *   4. Send snapshot to Gemini for synthesis (or rule-based fallback)
+ *   4. Classify the snapshot with the deterministic rule engine
  *   5. Persist result → return
  *
  * Graceful degradation:
@@ -19,27 +19,24 @@
 
 import { NextResponse } from "next/server";
 import { cache, TTL } from "@/lib/cache";
-import { getAiStatus } from "@/lib/gemini";
 import { loadMacroView, saveMacroView } from "@/lib/store";
 import { buildMacroSnapshot } from "@/lib/macro-data";
-import { generateMacroView } from "@/lib/gemini";
+import { generateMacroView } from "@/lib/macro-engine";
 import type { MacroView } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
-export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url);
-  const aiStatus = getAiStatus(searchParams.get("provider"));
-  const cacheKey = `macro:view:${aiStatus.provider}`;
+export async function GET() {
+  const cacheKey = "macro:view:rules";
 
   // 1. In-memory cache
   const memCached = cache.get<MacroView>(cacheKey);
   if (memCached) {
-    return NextResponse.json({ data: memCached, error: null, source: "cache", _debug: { ...aiStatus, aiCalled: false } });
+    return NextResponse.json({ data: memCached, error: null, source: "cache" });
   }
 
   // 2. SQLite store — return if fresh enough
-  const stored = loadMacroView(aiStatus.provider);
+  const stored = loadMacroView();
   if (stored && !stored.stale) {
     cache.set(cacheKey, stored.data, TTL.MACRO_VIEW);
     return NextResponse.json({
@@ -48,17 +45,16 @@ export async function GET(req: Request) {
       cachedAt: stored.updatedAt,
       stale: false,
       source: "store",
-      _debug: { ...aiStatus, aiCalled: false },
     });
   }
 
   // 3. Build structured macro snapshot + generate synthesis
   try {
     const snapshot = await buildMacroSnapshot();
-    const view = await generateMacroView(snapshot, aiStatus.provider);
+    const view = generateMacroView(snapshot);
 
     // Persist
-    saveMacroView(view, aiStatus.provider);
+    saveMacroView(view);
     cache.set(cacheKey, view, TTL.MACRO_VIEW);
 
     return NextResponse.json({
@@ -66,8 +62,7 @@ export async function GET(req: Request) {
       error: null,
       cachedAt: view.generatedAt,
       stale: false,
-      source: view.source !== "fallback" ? view.source : "fallback",
-      _debug: { ...aiStatus, aiCalled: true, aiSource: view.source },
+      source: "rules",
     });
   } catch (err) {
     console.error("[macro-view]", err);
@@ -81,7 +76,6 @@ export async function GET(req: Request) {
         cachedAt: stored.updatedAt,
         stale: true,
         source: "store-stale",
-        _debug: { ...aiStatus, aiCalled: true },
       });
     }
 

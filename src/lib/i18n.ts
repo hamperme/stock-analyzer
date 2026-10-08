@@ -3,7 +3,7 @@ import type { AppLocale } from "./app-settings";
 export const dictionaries = {
   en: {
     layout: {
-      marketTagline: (provider: string) => `Data via Finnhub & Yahoo Finance · Stocks + crypto · AI via ${provider}`,
+      marketTagline: () => "Finnhub, Yahoo, Binance & Cboe market data · Stocks + crypto",
       footerLead: "StockPulse · Data for informational purposes only · Not financial advice ·",
       openSource: "Open Source",
     },
@@ -12,17 +12,10 @@ export const dictionaries = {
       title: "Settings",
       language: "Language",
       appearance: "Appearance",
-      aiProvider: "AI Provider",
-      noAiProviders: "No AI provider detected. Add GEMINI_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY to .env.local and restart.",
       english: "English",
       chinese: "简体中文",
       dark: "Dark",
       light: "Light",
-      providers: {
-        gemini: "Gemini",
-        openai: "OpenAI",
-        anthropic: "Claude",
-      },
     },
     common: {
       stock: "Stock",
@@ -93,7 +86,6 @@ export const dictionaries = {
     macro: {
       title: "Macro Regime",
       noData: "No macro data available. Run a Full Refresh to populate market data, then reload.",
-      aiSynthesized: "AI-Synthesized",
       ruleBased: "Rule-Based",
       bullCase: "Bull Case",
       bearCase: "Bear Case",
@@ -168,28 +160,6 @@ export const dictionaries = {
         Sideways: "Sideways",
       },
     },
-    ai: {
-      title: "AI Analysis",
-      refresh: "Refresh",
-      generating: "Generating AI analysis...",
-      wait: "This may take a few seconds",
-      recommendation: "Recommendation",
-      confidence: "Confidence",
-      targetEntry: "Target Entry",
-      stopLoss: "Stop Loss",
-      bullCase: "Bull Case",
-      bearCase: "Bear Case",
-      keyRisks: "Key Risks",
-      disclaimer:
-        "AI-generated analysis is for informational purposes only and does not constitute financial advice.",
-      recommendations: {
-        "Strong Buy": "Strong Buy",
-        Buy: "Buy",
-        Neutral: "Neutral",
-        Sell: "Sell",
-        "Strong Sell": "Strong Sell",
-      },
-    },
     news: {
       title: "Latest Headlines",
       articles: (count: number) => `${count} articles`,
@@ -209,7 +179,7 @@ export const dictionaries = {
   },
   zh: {
     layout: {
-      marketTagline: (provider: string) => `数据来自 Finnhub 与 Yahoo Finance · 股票 + 加密货币 · AI 由 ${provider} 提供`,
+      marketTagline: () => "Finnhub、Yahoo、Binance 与 Cboe 市场数据 · 股票 + 加密货币",
       footerLead: "StockPulse · 仅供信息参考 · 不构成投资建议 ·",
       openSource: "开源项目",
     },
@@ -218,17 +188,10 @@ export const dictionaries = {
       title: "设置",
       language: "语言",
       appearance: "外观",
-      aiProvider: "AI 提供方",
-      noAiProviders: "未检测到可用的 AI 提供方。请在 .env.local 中添加 GEMINI_API_KEY、OPENAI_API_KEY 或 ANTHROPIC_API_KEY 后重启应用。",
       english: "English",
       chinese: "简体中文",
       dark: "深色",
       light: "浅色",
-      providers: {
-        gemini: "Gemini",
-        openai: "OpenAI",
-        anthropic: "Claude",
-      },
     },
     common: {
       stock: "股票",
@@ -299,7 +262,6 @@ export const dictionaries = {
     macro: {
       title: "宏观市场状态",
       noData: "暂无宏观数据。请先执行完整刷新，然后重新加载。",
-      aiSynthesized: "AI 综合判断",
       ruleBased: "规则判断",
       bullCase: "看多理由",
       bearCase: "看空理由",
@@ -372,27 +334,6 @@ export const dictionaries = {
         Downtrend: "下降趋势",
         "Strong Downtrend": "强势下降趋势",
         Sideways: "横盘整理",
-      },
-    },
-    ai: {
-      title: "AI 分析",
-      refresh: "刷新",
-      generating: "正在生成 AI 分析...",
-      wait: "这可能需要几秒钟",
-      recommendation: "建议",
-      confidence: "置信度",
-      targetEntry: "目标入场位",
-      stopLoss: "止损位",
-      bullCase: "看多理由",
-      bearCase: "看空理由",
-      keyRisks: "关键风险",
-      disclaimer: "AI 生成的分析仅供参考，不构成任何投资建议。",
-      recommendations: {
-        "Strong Buy": "强烈买入",
-        Buy: "买入",
-        Neutral: "中性",
-        Sell: "卖出",
-        "Strong Sell": "强烈卖出",
       },
     },
     news: {

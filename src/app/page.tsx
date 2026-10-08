@@ -5,7 +5,6 @@ import { MacroViewPanel } from "@/components/dashboard/MacroViewPanel";
 import { WatchlistTable } from "@/components/dashboard/WatchlistTable";
 import { RefreshButton } from "@/components/dashboard/RefreshButton";
 import { readAppSettings } from "@/lib/app-settings";
-import { getAvailableAiProviders } from "@/lib/ai-provider-server";
 import {
   getInitialFearGreedPayload,
   getInitialIndicesPayload,
@@ -18,11 +17,11 @@ import { getDictionary } from "@/lib/i18n";
 export const dynamic = "force-dynamic";
 
 export default function DashboardPage() {
-  const { locale, aiProvider, market } = readAppSettings(cookies(), getAvailableAiProviders());
+  const { locale, market } = readAppSettings(cookies());
   const dict = getDictionary(locale);
   const indices = getInitialIndicesPayload(market);
   const fearGreed = getInitialFearGreedPayload();
-  const macroView = getInitialMacroViewPayload(aiProvider);
+  const macroView = getInitialMacroViewPayload();
   const watchlist = getWatchlistPayload();
   const refreshMeta = getRefreshMetaPayload();
 
